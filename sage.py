@@ -699,17 +699,20 @@ reminder_alarming = threading.Event()  # global flag for any reminder going off
 bedtime_mode = threading.Event()  # when set, Sage is in do-not-disturb mode
 
 def enter_bedtime():
-    """Enter bedtime mode — silence alarms, dim lights, DND."""
+    """Enter bedtime mode — release mic, silence alarms, dim lights, DND."""
     bedtime_mode.set()
-    dismiss_alarms()  # stop any active alarms
+    dismiss_alarms()
     lights.set_state("off")
-    print("Bedtime mode ON", flush=True)
+    # Signal main loop to release the mic
+    mic_release.set()
+    print("Bedtime mode ON — mic released", flush=True)
 
 def exit_bedtime():
-    """Exit bedtime mode — resume normal operation."""
+    """Exit bedtime mode — reopen mic, resume normal operation."""
     bedtime_mode.clear()
+    mic_release.clear()  # signal main loop to reopen mic
     lights.set_state("idle")
-    print("Bedtime mode OFF", flush=True)
+    print("Bedtime mode OFF — mic active", flush=True)
 
 def bedtime_scheduler():
     """Auto-enable bedtime at 10pm weekdays, 11:30pm weekends. Auto-wake at 6am."""
@@ -1573,14 +1576,15 @@ else:
 lights.set_state("idle")
 
 while True:
-    # Check if alarm thread needs the mic
+    # Check if something needs the mic released (alarm or bedtime)
     if mic_release.is_set():
         stream.stop_stream()
         stream.close()
         mic_released.set()
-        # Wait until alarm thread is done with mic
+        # Wait until mic is needed again
         while mic_release.is_set():
-            time.sleep(0.1)
+            time.sleep(0.5)
+        mic_released.clear()
         # Reopen mic
         stream = p.open(
             format=pyaudio.paInt16,
@@ -1591,6 +1595,8 @@ while True:
             frames_per_buffer=8192
         )
         rec.Reset()
+        oww_audio_buffer = np.zeros(32000, dtype=np.int16)
+        print("Mic reopened", flush=True)
         continue
 
     # Skip Vosk during alarm (chime playing)
