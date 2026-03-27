@@ -1,6 +1,5 @@
-# Sage 🌿
-
-**A privacy-first voice assistant for your kitchen, built on a Raspberry Pi.**
+# Sage v1.3 🌿
+### A privacy-first voice assistant for your kitchen, built on a Raspberry Pi.
 
 Sage is an open-source voice assistant that does the everyday things a kitchen assistant should do — set timers, give weather reports, manage reminders, chat with Claude AI — without sending your voice to the cloud. The voice pipeline runs entirely on a Raspberry Pi.
 
@@ -8,156 +7,250 @@ Sage is an open-source voice assistant that does the everyday things a kitchen a
 
 ---
 
-## Features
+## Why Sage?
 
-### Voice Commands (all processed locally)
+In early 2025, the last remaining opt-out for local voice processing was quietly removed from major commercial smart speakers. The official reason was generative AI — new features need the cloud. The effect was that users lost the ability to keep any part of their voice data on-device, with no alternative offered.
 
-| Category | Commands | What Sage Does |
-|----------|----------|----------------|
-| **Timers** | "Set a timer for 10 minutes" | Countdown with alarm chime |
-| | "Set a pasta timer for 12 minutes" | Named timer |
-| | Say a preset name (e.g., "pasta") | Starts preset timer with saved duration |
-| | "What timers are running?" | Lists active timers |
-| | "How much time is left?" | Time remaining |
-| | "Stop" / "Stop the timer" | Dismiss alarm |
-| | "Cancel the pasta" | Cancel specific timer |
-| | "Cancel everything" | Cancel all timers + reminders |
-| **Reminders** | "Remind me to check the laundry in 20 minutes" | Speaks + push notification |
-| | "Remind me to call mom at 5:30 PM" | Time-of-day reminder |
-| **Weather** | "What's the weather?" | Current conditions + outfit tips |
-| | "What's the weather tomorrow?" | Tomorrow's forecast |
-| **Calendar** | "What's on the calendar today?" | Reads today's events |
-| | "What's my schedule?" | Same as above |
-| **Time** | "What time is it?" | Speaks current time |
-| | "What day is it?" | Day and full date |
-| **System** | "System status" | Uptime, CPU temp, memory, disk, firewall |
-| | "Is the firewall running?" | Firewall check |
-| | "Turn on/off the firewall" | Manage firewall |
-| **Bedtime** | "Goodnight" | Enters sleep mode — mic off, notifications silenced |
-| | "Good morning" | Wakes up with weather + calendar briefing |
-| **Spotify** | "Play [artist]" | Plays on Spotify (requires API setup) |
-| | "Pause" / "Next" | Playback control |
-| **Fun** | "Tell me a joke" | Kitchen-themed jokes |
-| | "Who are you?" | Introduces itself |
-| | "Who made you?" | Credits the creator |
-| | "Thank you" | Responds warmly |
-
-### Claude AI Voice Chat (optional, requires API key)
-
-Say **"Hey Claude"** to start an open-ended conversation powered by Anthropic's Claude API. Ask anything — recipes, homework help, general knowledge, advice. Claude knows when to hand off to Sage for timers and local commands.
-
-- Separate wake word and chime from Sage
-- Conversation mode — back-and-forth without repeating the wake word
-- Seamless handoff: ask Claude for a timer and Sage handles it automatically
-- Completely optional — Sage works fully standalone without it
-
-### Background Features (automatic)
-
-- **Push notifications** via ntfy — works on your phone even away from home
-- **Google Calendar** integration via iCal — notifications before events
-- **Scheduled reminders** — configurable daily/weekly reminders
-- **Security monitoring** — alerts on failed SSH login attempts
-- **System update checker** — notifies every 3 days if updates are available
-- **Bedtime/wake schedule** — auto-sleep at 10 PM weekdays / 11:30 PM weekends, auto-wake with morning briefing
-- **Firewall** — UFW enabled on boot, SSH only
-
-### LED Indicator Ring (optional, WS2812B)
-
-Visual status indicators when an LED ring is connected:
-
-| State | Color |
-|-------|-------|
-| Idle | Warm amber glow |
-| Sage listening | Green |
-| Processing | Blue spin |
-| Claude listening | Reddish-orange |
-| Timer counting | Slow warm pulse |
-| Alarm | Orange/red flash |
-| Security alert | Red strobe |
-| Bedtime | Off |
+Sage is that alternative. The voice pipeline runs locally. Audio is never stored, never uploaded, never sent anywhere except out your speaker.
 
 ---
 
 ## Hardware
 
-- **Raspberry Pi 4** (4GB recommended)
+- **Raspberry Pi 4** (CanaKit or equivalent)
 - **USB microphone**
 - **USB speaker** (or Bluetooth soundbar)
-- **Optional:** WS2812B 24-LED ring + 3 jumper wires for visual indicators
-- **Optional:** USB extension cable to move mic away from Pi fan
+- **WS2812B LED ring** (optional — 24-bit, for visual indicators)
+- **Female-to-female jumper wires** (3 needed for LED ring)
+
+---
+
+## What it does
+
+### Kitchen
+- ⏱ **Kitchen timers** — "Set a timer for 10 minutes"
+- ⏱ **Named timers** — "Set a chicken nuggets timer for 13 minutes"
+- ⏱ **Preset food timers** — 23 built-in presets, say "pasta timer" and it auto-sets
+- ⏱ **Multiple simultaneous timers** — "What timers are running?"
+- 🔔 **Persistent alarms** — repeating chime until you say "stop"
+
+### Reminders
+- 📋 **Voice reminders (relative)** — "Remind me to check the laundry in 20 minutes"
+- 📋 **Voice reminders (time-of-day)** — "Remind me to pick up the kids at 3:30 PM"
+- 📋 **Scheduled reminders** — recurring alerts at specific times/days (configurable)
+- 📲 **Push notifications** — all reminders push to your phone via [ntfy](https://ntfy.sh)
+
+### Weather
+- 🌤 **Today's weather** — "What's the weather?" with smart outfit suggestions
+- 🌤 **Tomorrow's forecast** — "What's the weather tomorrow?"
+- 🧥 Smart tips — umbrella, jacket, hydration based on conditions
+
+### Calendar
+- 📅 **Google Calendar** — "What's on the calendar today?"
+- 📅 Fetches events via iCal (no API key needed)
+- 📅 Push notifications 15 minutes before each event
+
+### Claude AI (optional)
+- 🤖 **Voice chat with Claude** — "Hey Claude, what's a good recipe for banana bread?"
+- 🤖 **Conversation mode** — back-and-forth conversation, no need to repeat the wake word
+- 🤖 **Smart handoff** — ask Claude to set a timer and it seamlessly passes to Sage
+- 🤖 Requires an [Anthropic API key](https://console.anthropic.com) — completely optional
+
+### Time & Date
+- 🕐 "What time is it?"
+- 📆 "What day is it?" / "What's the date?"
+
+### Security & System
+- 🔒 **Firewall control** — "Is the firewall running?" / "Turn on the firewall"
+- 📊 **System status** — "System status" (uptime, CPU temp, memory, disk, firewall)
+- 🚨 **Intrusion detection** — voice + push alert on failed SSH login attempts
+- 🔄 **Update checker** — notifies every 3 days if system or package updates are available
+
+### Bedtime & Morning
+- 😴 **Bedtime mode** — "Goodnight" silences alerts, dims lights
+- ☀️ **Morning briefing** — "Good morning" triggers weather + calendar
+- ⏰ Auto bedtime: 10 PM weekdays, 11:30 PM weekends
+- ⏰ Auto wake: 6:30 AM weekdays, 8:30 AM weekends with full briefing
+
+### Music
+- 🎵 **Spotify playback** — "Play Fleetwood Mac" (requires Spotify API + Raspotify setup)
+- 🎵 **Song, artist, or playlist search** — searches tracks first, then artists, then playlists
+- 🎵 Pause, resume, skip, previous by voice
+- 🎵 **Volume control** — "Volume 50", "Volume up", "Volume down"
+- 🎵 **Now playing** — "What's playing?" / "What song is this?"
+- 🎵 **Plays through the Pi** — Raspotify turns the Pi into a Spotify Connect speaker, no phone needed
+
+### Personality
+- 🎭 Varied responses — Sage doesn't repeat the same phrase
+- 😄 Easter eggs — "Tell me a joke", "Who are you?", "Who made you?", "When is your birthday?"
+- 🙏 Says "you're welcome" when you say thanks
+- 👤 **Voice identification** — "Who am I?" (guesses who's talking from voice profiles)
+
+### Visual Indicators (LED ring)
+- 🟢 **Green** — Sage is idle/listening
+- 🔵 **Blue pulse** — wake word detected
+- 🔵 **Blue solid** — recording your command
+- 🔵 **Blue spin** — processing
+- 🟢 **Green flash** — command understood
+- 🟠 **Orange pulse** — timer counting down
+- 🔴 **Red flash** — alarm going off
+- 🟠 **Reddish-orange** — Claude is active
+- 🔴 **Red strobe** — security alert
 
 ---
 
 ## Setup
 
-### 1. Install dependencies
+### 1. Flash the SD card
+
+Use [Raspberry Pi Imager](https://www.raspberrypi.com/software/). Choose **Raspberry Pi OS Lite (64-bit)**. Configure:
+
+- Hostname: `sage`
+- Enable SSH with password authentication
+- Set your username and password
+- Configure your WiFi
+
+### 2. SSH in
 
 ```bash
-sudo apt update && sudo apt install -y python3-pip python3-pyaudio ufw
-pip3 install vosk faster-whisper openwakeword spotipy python-dateutil icalendar --break-system-packages
+ssh yourusername@sage.local
 ```
 
-### 2. Install speech engine (Piper TTS)
-
-Download [Piper](https://github.com/rhasspy/piper) and a voice model (en_US-lessac-medium recommended).
-
-### 3. Install Vosk model
+### 3. Update the system
 
 ```bash
-cd ~
+sudo apt update && sudo apt upgrade -y
+```
+
+### 4. Install dependencies
+
+```bash
+sudo apt install -y python3-pip python3-pyaudio git cmake
+pip3 install vosk faster-whisper spotipy openwakeword python-dateutil icalendar --break-system-packages
+```
+
+### 5. Install Vosk model (wake word detection)
+
+```bash
 wget https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip
 unzip vosk-model-small-en-us-0.15.zip
 ```
 
-### 4. Create credentials file
+### 6. Install Piper (local text-to-speech)
 
 ```bash
-cat > ~/.sage_credentials << EOF
+wget https://github.com/rhasspy/piper/releases/latest/download/piper_linux_aarch64.tar.gz
+tar xzf piper_linux_aarch64.tar.gz
+sudo mv piper/piper /usr/local/bin/
+sudo cp ~/piper/*.so* /usr/local/lib/
+sudo ldconfig
+sudo apt install -y libespeak-ng1
+
+mkdir -p ~/piper-voices
+wget -O ~/piper-voices/en_US-lessac-medium.onnx \
+  https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx
+wget -O ~/piper-voices/en_US-lessac-medium.onnx.json \
+  https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json
+```
+
+### 7. Install Raspotify (optional — for Spotify playback through the Pi)
+
+```bash
+curl -sL https://dtcooper.github.io/raspotify/install.sh | sh
+```
+
+Then configure it to use your USB speaker:
+
+```bash
+sudo nano /etc/raspotify/conf
+```
+
+Set these values:
+```
+LIBRESPOT_NAME="Sage"
+LIBRESPOT_DEVICE="plughw:4,0"   # match your speaker card number from aplay -l
+```
+
+Restart:
+```bash
+sudo systemctl restart raspotify
+```
+
+This makes the Pi a Spotify Connect speaker called "Sage" — Sage voice commands will play music directly through the Pi's speaker with no phone or computer required.
+
+### 8a. Find your audio devices
+
+```bash
+aplay -l    # speaker card number
+arecord -l  # mic card number
+```
+
+Update `MIC_DEVICE_INDEX` and `SPEAKER_DEVICE` in `sage.py` to match your hardware.
+
+### 8b. Create credentials file
+
+Create `~/.sage_credentials` (gitignored):
+
+```
 SPOTIPY_CLIENT_ID=your_spotify_client_id
 SPOTIPY_CLIENT_SECRET=your_spotify_client_secret
-ANTHROPIC_API_KEY=your_anthropic_key_optional
-EOF
-chmod 600 ~/.sage_credentials
+SPOTIPY_REFRESH_TOKEN=
+ANTHROPIC_API_KEY=your_anthropic_api_key
 ```
 
-### 5. Create config file
+> Spotify and Anthropic keys are optional. Sage works fully without them — you just won't have music or Claude chat.
 
-```bash
-cat > ~/.sage_config.json << 'EOF'
+### 8c. Spotify authentication (if using Spotify)
+
+1. Create a [Spotify Developer App](https://developer.spotify.com/dashboard)
+2. Set the Redirect URI to `http://127.0.0.1:8888/callback` in your app settings
+3. Add your Client ID and Secret to `~/.sage_credentials`
+4. Run `python3 ~/spotify_auth.py` — open the URL in a browser, log in, paste the redirect URL back
+5. Token is cached at `~/spotipy.cache` — Sage will auto-refresh it
+
+### 9. Personal config (optional)
+
+Create `~/.sage_config.json` for presets, reminders, calendar, and notifications:
+
+```json
 {
-  "preset_timers": {
-    "pasta": 720,
-    "rice": 420,
-    "hard boiled eggs": 660
-  },
-  "scheduled_reminders": [],
-  "ntfy_url": "https://ntfy.sh",
-  "ntfy_topic": "your-random-topic-name",
-  "ical_url": ""
+    "preset_timers": {
+        "pasta": 720,
+        "rice": 420,
+        "chicken nuggets": 780,
+        "eggs": 600
+    },
+    "scheduled_reminders": [
+        {
+            "message": "Time for your meeting!",
+            "hour": 9,
+            "minute": 0,
+            "days": [0, 1, 2, 3, 4],
+            "skip_months": []
+        }
+    ],
+    "ical_url": "your-google-calendar-secret-ical-url",
+    "calendar_notify_minutes_before": 15,
+    "ntfy_url": "https://ntfy.sh",
+    "ntfy_topic": "your-secret-topic-name"
 }
-EOF
 ```
 
-### 6. Enable firewall
-
-```bash
-sudo ufw allow 22/tcp
-sudo ufw --force enable
-```
-
-### 7. Set up auto-start
+### 10. Set up the systemd service
 
 ```bash
 sudo tee /etc/systemd/system/sage.service << EOF
 [Unit]
 Description=Sage Voice Assistant
-After=network.target sound.target
+After=network-online.target sound.target
+Wants=network-online.target
 
 [Service]
+Type=simple
 User=sage
 WorkingDirectory=/home/sage
 ExecStart=/usr/bin/python3 /home/sage/sage.py
-Restart=always
+Restart=on-failure
 RestartSec=5
 
 [Install]
@@ -169,70 +262,150 @@ sudo systemctl enable sage
 sudo systemctl start sage
 ```
 
-### 8. (Optional) Claude AI voice chat
+### 11. Firewall (recommended)
 
-Get an API key from [console.anthropic.com](https://console.anthropic.com) and add it to `~/.sage_credentials`. If no key is present, Sage works fully without it.
+```bash
+sudo apt install -y ufw
+sudo ufw default deny incoming
+sudo ufw allow ssh
+sudo ufw --force enable
+```
 
-### 9. (Optional) Push notifications
+### 12. Train your wake word (optional)
 
-Install the [ntfy app](https://ntfy.sh) on your phone and subscribe to your topic.
+The included `hey_sage.onnx` and `hey_claude.onnx` models work out of the box but were trained on one family's voices. For best results, train your own using [openWakeWord](https://github.com/dscripka/openWakeWord). Record 30+ samples per household member saying "hey sage" and retrain.
 
 ---
 
-## Architecture
+## How it works
 
 ```
-Microphone → Vosk (wake word) → "Hey Sage" detected
-                                      ↓
-                               Whisper (command STT)
-                                      ↓
-                               Command handler
-                                      ↓
-                              Piper TTS → Speaker
-
-Microphone → Vosk (wake word) → "Hey Claude" detected
-                                      ↓
-                               Whisper (question STT)
-                                      ↓
-                               Claude API (cloud)
-                                      ↓
-                              Piper TTS → Speaker
+Wake word detection (openWakeWord + Vosk)
+              |
+     "Hey Sage" detected → Chime → Record audio
+              |                         |
+              |              Faster Whisper (local STT)
+              |                         |
+              |                  Command parsed
+              |                    /        \
+              |            Sage command    "Hey Claude"
+              |           (local)          (API call)
+              |              |                |
+              |         handle_command    Claude responds
+              |              |                |
+              └──── Piper TTS → Speaker ──────┘
+                              |
+              Scheduled reminders ─┐
+              Calendar events ─────┤→ ntfy push → Phone
+              Security alerts ─────┘
 ```
 
-All voice processing (wake word detection, speech-to-text) happens locally on the Pi. Only Claude conversations are sent to the cloud, and only when explicitly invoked with "Hey Claude."
+All speech processing happens on-device. Outbound network traffic is limited to: Spotify streaming, ntfy push notifications, weather API (Open-Meteo), Google Calendar iCal fetches, and Claude API calls (only when you say "Hey Claude").
 
 ---
 
-## Files
+## Voice commands
 
-| File | Description |
-|------|-------------|
-| `sage.py` | Main application — voice loop, commands, timers, reminders, Claude |
-| `sage_lights.py` | LED ring controller (WS2812B) |
-| `spotify_auth.py` | Spotify OAuth setup helper |
-| `hey_sage.onnx` | Custom trained "hey sage" wake word model |
-| `hey_claude.onnx` | Custom trained "hey claude" wake word model |
-| `.gitignore` | Keeps credentials and personal config out of the repo |
+### Sage commands (all local, no cloud)
 
-### Not in repo (private per-installation)
+| Command | What it does |
+|---|---|
+| "Hey Sage" | Wake word — activates Sage |
+| "Set a timer for 10 minutes" | Starts a countdown timer |
+| "Set a pasta timer for 12 minutes" | Named timer |
+| "Chicken nuggets" | Preset timer (13 min) |
+| "What timers are running?" | Lists active timers |
+| "How much time is left?" | Time remaining on timers |
+| "Stop" / "Stop the timer" | Dismisses ringing alarm |
+| "Cancel all timers" | Cancels pending timers |
+| "Cancel all reminders" | Cancels pending reminders |
+| "Cancel everything" | Cancels all timers + reminders |
+| "Remind me to X in 20 minutes" | Voice reminder (relative) |
+| "Remind me to X at 5:30 PM" | Voice reminder (time-of-day) |
+| "What's the weather?" | Today's conditions + tips |
+| "What's the weather tomorrow?" | Tomorrow's forecast |
+| "What's on the calendar?" | Today's events |
+| "What time is it?" | Current time |
+| "What day is it?" | Day and date |
+| "Is the firewall running?" | Firewall status |
+| "Turn on/off the firewall" | Enable/disable firewall |
+| "System status" | Full system report |
+| "Goodnight" | Enter bedtime mode |
+| "Good morning" | Exit bedtime + briefing |
+| "Tell me a joke" | Random kitchen joke |
+| "Who are you?" | Self-introduction |
+| "Who made you?" | Credits |
+| "Thank you" | You're welcome! |
+| "Play [song/artist/playlist]" | Play music on Spotify |
+| "Pause" / "Stop music" | Pause playback |
+| "Resume" | Resume playback |
+| "Skip" / "Next" | Skip to next track |
+| "Previous" | Go to previous track |
+| "Volume [0–100]" | Set volume level |
+| "Volume up" / "Volume down" | Adjust volume by 15% |
+| "What's playing?" | Currently playing track + artist |
 
-| File | Description |
-|------|-------------|
-| `~/.sage_credentials` | API keys and passwords |
-| `~/.sage_config.json` | Preset timers, reminders, ntfy settings, calendar URL |
-| `~/voice_profiles.npz` | Family voice profiles for "who am I?" feature |
+### Claude commands (requires API key)
+
+| Command | What it does |
+|---|---|
+| "Hey Claude" | Activates Claude conversation mode |
+| Ask anything | Open-ended Q&A, recipes, homework help, advice |
+| "Goodbye" / "Thanks Claude" | Exit conversation, return to Sage |
+| Ask for a timer/weather/etc. | Claude hands off to Sage automatically |
+
+---
+
+## LED ring wiring (optional)
+
+If using a WS2812B LED ring (24-bit recommended):
+
+| LED ring pin | Pi GPIO pin |
+|---|---|
+| 5V | Pin 2 or 4 |
+| GND | Pin 6 |
+| DIN | Pin 12 (GPIO 18) |
+
+No soldering required — use female-to-female jumper wires.
+
+---
+
+## Troubleshooting
+
+**Wake word not triggering**
+- The included wake word models may not match your voice — retrain with your own samples
+- Vosk fallback is enabled with common mishearings
+- Move the mic away from the Pi's fan if possible (USB extension cable helps)
+
+**Whisper recognition is poor**
+- Fan noise is the most common issue — a USB extension cable for the mic helps significantly
+- faster-whisper with the base.en model balances speed and accuracy on Pi 4
+- Sage calibrates a noise baseline before each recording to filter ambient noise
+
+**"Sorry, I couldn't reach Claude"**
+- Check your Anthropic API key in `~/.sage_credentials`
+- Verify the model name in sage.py matches available models
+- Check your API credit balance at console.anthropic.com
+
+**Speaker not working**
+- `sage.py` sets volume to max on startup — verify card numbers match your hardware
+- Check with `aplay -l` and update `SPEAKER_DEVICE` in sage.py
+
+**Service won't start**
+- Check logs: `journalctl -u sage -f`
+- Common issue: mic or speaker device busy from another process
 
 ---
 
 ## Privacy
 
-- **Wake word detection**: local (openWakeWord)
-- **Speech-to-text**: local (Vosk + Whisper)
-- **Text-to-speech**: local (Piper)
-- **Timers, weather, calendar, reminders**: local processing
-- **Claude AI chat**: sent to Anthropic API only when you say "Hey Claude" — completely optional
-- **Push notifications**: sent via ntfy (self-hosted option available)
-- **No telemetry, no analytics, no accounts required**
+- Voice is processed by [Vosk](https://alphacephei.com/vosk/) and [Faster Whisper](https://github.com/SYSTRAN/faster-whisper) running locally on the Pi
+- Text-to-speech is handled by [Piper](https://github.com/rhasspy/piper) running locally on the Pi
+- Wake word detection uses [openWakeWord](https://github.com/dscripka/openWakeWord) running locally
+- No audio is ever sent to an external server or stored
+- Claude AI chat is **opt-in** — only activates when you say "Hey Claude" and requires your own API key
+- Internet is used only for: Spotify, weather (Open-Meteo), calendar (iCal), push notifications (ntfy), and Claude API
+- All personal config, credentials, and voice profiles are gitignored
 
 ---
 
@@ -242,10 +415,10 @@ All voice processing (wake word detection, speech-to-text) happens locally on th
 
 - Free to use, fork, and modify for personal and non-commercial use
 - Commercial use requires written permission from the copyright holder
-- Attribution required: **Britta Davis / [ohgollybritta.com](https://ohgollybritta.com)**
+- Attribution required: **Britta Davis / [oh golly britta](https://ohgollybritta.com)**
 
 See [LICENSE](LICENSE) for full terms.
 
 ---
 
-Made by [ohgollybritta.com](https://ohgollybritta.com)
+*Built by [oh golly britta](https://ohgollybritta.com)*

@@ -200,20 +200,34 @@ else:
 sys.stdout.flush()
 
 # ── Spotify ──────────────────────────────────────────────────────────────────
-import spotipy
-from spotipy.oauth2 import SpotifyOAuth
-
-sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
-    client_id=os.environ["SPOTIPY_CLIENT_ID"],
-    client_secret=os.environ["SPOTIPY_CLIENT_SECRET"],
-    redirect_uri="http://127.0.0.1:8888/callback",
-    scope="user-modify-playback-state user-read-playback-state",
-    cache_path=os.path.expanduser("~/spotipy.cache")
-))
+sp = None
+try:
+    import spotipy
+    from spotipy.oauth2 import SpotifyOAuth
+    _sp_id = os.environ.get("SPOTIPY_CLIENT_ID", "")
+    _sp_secret = os.environ.get("SPOTIPY_CLIENT_SECRET", "")
+    if _sp_id and _sp_secret:
+        sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
+            client_id=_sp_id,
+            client_secret=_sp_secret,
+            redirect_uri="http://127.0.0.1:8888/callback",
+            scope="user-modify-playback-state user-read-playback-state",
+            cache_path=os.path.expanduser("~/spotipy.cache"),
+            open_browser=False
+        ))
+        # Test the connection
+        sp.current_user()
+        print("Spotify connected", flush=True)
+    else:
+        print("Spotify credentials not set — Spotify disabled", flush=True)
+except Exception as e:
+    print(f"Spotify not available: {e}", flush=True)
+    sp = None
 
 # ── Text-to-speech ───────────────────────────────────────────────────────────
 PIPER_DIR = "/home/sage/piper"
-VOICE_MODEL = "/home/sage/piper-voices/en_US-lessac-medium.onnx"
+VOICE_MODEL        = "/home/sage/piper-voices/en_GB-northern_english_male-medium.onnx"  # Sage — Northern British male
+CLAUDE_VOICE_MODEL = "/home/sage/piper-voices/en_US-lessac-medium.onnx"  # Claude
 # ── Auto-detect USB audio devices ─────────────────────────────────────────────
 def find_usb_devices():
     """Find USB speaker and mic card numbers dynamically."""
@@ -264,10 +278,12 @@ if _mic_card:
 # ── Faster Whisper (for command recognition) ─────────────────────────────────
 from faster_whisper import WhisperModel
 print("Loading Whisper model...", flush=True)
-whisper_model = WhisperModel("tiny.en", device="cpu", compute_type="int8")
+whisper_model = WhisperModel("base.en", device="cpu", compute_type="int8")
 print("Whisper model ready", flush=True)
 
-def speak(text):
+def speak(text, voice=None):
+    if voice is None:
+        voice = VOICE_MODEL
     env = {
         "LD_PRELOAD": f"{PIPER_DIR}/libpiper_phonemize.so.1.2.0",
         "LD_LIBRARY_PATH": PIPER_DIR,
@@ -275,7 +291,7 @@ def speak(text):
         "PATH": "/usr/local/bin:/usr/bin:/bin",
     }
     piper = subprocess.Popen(
-        ["piper", "--model", VOICE_MODEL, "--output_raw"],
+        ["piper", "--model", voice, "--output_raw"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env
     )
     aplay = subprocess.Popen(
@@ -287,20 +303,13 @@ def speak(text):
     piper.wait()
     aplay.wait()
 
+def speak_claude(text):
+    """Speak using Claude's distinct voice."""
+    speak(text, voice=CLAUDE_VOICE_MODEL)
+
 # ── Chime (gentle prompt sound) ───────────────────────────────────────────────
-def play_chime():
-    """Play a gentle rising two-tone chime to signal listening."""
-    sr = 22050
-    samples = []
-    for freq, dur in [(523, 0.15), (659, 0.2)]:
-        n_samples = int(sr * dur)
-        for n in range(n_samples):
-            t = n / n_samples
-            envelope = math.sin(math.pi * t)
-            value = int(16000 * envelope * math.sin(2 * math.pi * freq * n / sr))
-            samples.append(struct.pack("<h", value))
-        for n in range(int(sr * 0.05)):
-            samples.append(struct.pack("<h", 0))
+def _play_raw(samples, sr=22050):
+    """Send raw 16-bit mono samples to the speaker."""
     raw = b"".join(samples)
     ap = subprocess.Popen(
         ["aplay", "-r", str(sr), "-f", "S16_LE", "-c", "1", "-D", SPEAKER_DEVICE],
@@ -309,85 +318,94 @@ def play_chime():
     ap.stdin.write(raw)
     ap.stdin.close()
     ap.wait()
+
+def _chime_note(freq, dur, sr=22050, amp=15000):
+    """Warm marimba-like note: gentle attack, smooth decay, clean tone."""
+    n = int(sr * dur)
+    samples = []
+    for i in range(n):
+        t = i / n
+        # Soft attack over first 6%, then smooth exponential decay
+        envelope = math.sin(math.pi * min(t * 16, 1.0)) * math.exp(-3.5 * t)
+        tone = (math.sin(2 * math.pi * freq * i / sr)
+              + math.sin(2 * math.pi * freq * 2 * i / sr) * 0.07)
+        value = int(amp * envelope * tone)
+        samples.append(struct.pack("<h", max(-32767, min(32767, value))))
+    return samples
+
+def _crystal_note(freq, dur, sr=22050, amp=14000):
+    """Crystalline harp/wind-chime note: soft attack then gentle ring-out with subtle overtones."""
+    n = int(sr * dur)
+    samples = []
+    for i in range(n):
+        t = i / n
+        # Quick soft attack (~1/8 of duration), then smooth exponential ring-out
+        envelope = math.sin(math.pi * min(t * 8, 1.0)) * math.exp(-2.8 * t)
+        tone = (math.sin(2 * math.pi * freq * i / sr)
+              + math.sin(2 * math.pi * freq * 2 * i / sr) * 0.10
+              + math.sin(2 * math.pi * freq * 3 * i / sr) * 0.04)
+        value = int(amp * envelope * tone)
+        samples.append(struct.pack("<h", max(-32767, min(32767, value))))
+    return samples
+
+def _gap(ms, sr=22050):
+    return [struct.pack("<h", 0)] * int(sr * ms / 1000)
+
+# ── Sage chimes: warm descending arpeggio (marimba-like) ─────────────────────
+
+def play_chime():
+    """Sage wake chime — G5 → E5 → C5 descending major arpeggio."""
+    s = []
+    s += _chime_note(784, 0.22)   # G5
+    s += _gap(20)
+    s += _chime_note(659, 0.22)   # E5
+    s += _gap(20)
+    s += _chime_note(523, 0.28)   # C5  (let the bottom note breathe)
+    _play_raw(s)
 
 def play_confirm_chime():
-    """Play a short descending chime to confirm command was heard."""
-    sr = 22050
-    samples = []
-    for freq, dur in [(659, 0.1), (523, 0.15)]:
-        n_samples = int(sr * dur)
-        for n in range(n_samples):
-            t = n / n_samples
-            envelope = math.sin(math.pi * t)
-            value = int(12000 * envelope * math.sin(2 * math.pi * freq * n / sr))
-            samples.append(struct.pack("<h", value))
-        for n in range(int(sr * 0.03)):
-            samples.append(struct.pack("<h", 0))
-    raw = b"".join(samples)
-    ap = subprocess.Popen(
-        ["aplay", "-r", str(sr), "-f", "S16_LE", "-c", "1", "-D", SPEAKER_DEVICE],
-        stdin=subprocess.PIPE, stderr=subprocess.DEVNULL
-    )
-    ap.stdin.write(raw)
-    ap.stdin.close()
-    ap.wait()
+    """Sage got-it chime — three quick descending pips: A5 → F5 → D5."""
+    s = []
+    s += _chime_note(880, 0.09)   # A5 — bright top pip
+    s += _gap(12)
+    s += _chime_note(698, 0.09)   # F5
+    s += _gap(12)
+    s += _chime_note(587, 0.11)   # D5 — settle on this one
+    _play_raw(s)
+
+# ── Claude chimes: crystalline ascending arpeggio ────────────────────────────
 
 def play_claude_chime():
-    """Play a warm two-tone chime for Claude (higher pitch than Sage)."""
-    sr = 22050
-    samples = []
-    for freq, dur in [(587, 0.15), (740, 0.2)]:  # D5 to F#5 — warmer/brighter
-        n_samples = int(sr * dur)
-        for n in range(n_samples):
-            t = n / n_samples
-            envelope = math.sin(math.pi * t)
-            value = int(16000 * envelope * math.sin(2 * math.pi * freq * n / sr))
-            samples.append(struct.pack("<h", value))
-        for n in range(int(sr * 0.05)):
-            samples.append(struct.pack("<h", 0))
-    raw = b"".join(samples)
-    ap = subprocess.Popen(
-        ["aplay", "-r", str(sr), "-f", "S16_LE", "-c", "1", "-D", SPEAKER_DEVICE],
-        stdin=subprocess.PIPE, stderr=subprocess.DEVNULL
-    )
-    ap.stdin.write(raw)
-    ap.stdin.close()
-    ap.wait()
+    """Claude listening chime — C5 → E5 → A5 major-sixth arpeggio, harp-like."""
+    s = []
+    s += _crystal_note(523, 0.28)   # C5
+    s += _gap(22)
+    s += _crystal_note(659, 0.28)   # E5
+    s += _gap(22)
+    s += _crystal_note(880, 0.34)   # A5  (lets the top note ring out)
+    _play_raw(s)
 
 def play_thinking_chime():
-    """Play a gentle pulsing tone to indicate Claude is thinking."""
-    sr = 22050
-    samples = []
-    # Three soft ascending notes — doo doo doo
-    for freq in [392, 440, 494]:  # G4, A4, B4
-        n_samples = int(sr * 0.12)
-        for n in range(n_samples):
-            t = n / n_samples
-            envelope = math.sin(math.pi * t) * 0.6
-            value = int(10000 * envelope * math.sin(2 * math.pi * freq * n / sr))
-            samples.append(struct.pack("<h", value))
-        # Tiny gap
-        for n in range(int(sr * 0.06)):
-            samples.append(struct.pack("<h", 0))
-    raw = b"".join(samples)
-    ap = subprocess.Popen(
-        ["aplay", "-r", str(sr), "-f", "S16_LE", "-c", "1", "-D", SPEAKER_DEVICE],
-        stdin=subprocess.PIPE, stderr=subprocess.DEVNULL
-    )
-    ap.stdin.write(raw)
-    ap.stdin.close()
-    ap.wait()
+    """Claude thinking chime — E5 → A5, softer two-note shimmer."""
+    s = []
+    s += _crystal_note(659, 0.20)   # E5
+    s += _gap(18)
+    s += _crystal_note(880, 0.26)   # A5
+    _play_raw(s)
 
 # ── Whisper command listener ─────────────────────────────────────────────────
-def whisper_listen(max_seconds=15):
+def whisper_listen(max_seconds=15, spoken_prompt=None):
     """Play chime, record with silence detection, then transcribe with Faster Whisper."""
     import wave
     wav_path = "/tmp/sage_cmd.wav"
     sample_rate = 16000
     chunk_size = 1600  # 0.1 seconds
 
-    time.sleep(0.3)
-    play_chime()
+    time.sleep(0.2)
+    if spoken_prompt:
+        speak(spoken_prompt)
+    else:
+        play_chime()
     lights.set_state("listening")
 
     # Start raw recording
@@ -440,6 +458,12 @@ def whisper_listen(max_seconds=15):
     if not frames:
         return ""
 
+    # If nothing crossed the speech threshold, don't transcribe — prevents
+    # Whisper from hallucinating text out of TV/fan background noise
+    if not speech_started:
+        print("No speech detected (below threshold), skipping transcription", flush=True)
+        return ""
+
     # Write WAV
     audio_data = b"".join(frames)
     with wave.open(wav_path, "wb") as wf:
@@ -452,14 +476,19 @@ def whisper_listen(max_seconds=15):
     print(f"Recorded {duration:.1f}s (baseline: {baseline:.0f}, threshold: {threshold:.0f})", flush=True)
 
     lights.set_state("processing")
-    play_confirm_chime()
-    # Transcribe with Faster Whisper
-    try:
-        import time as _t
+    # Start transcription in background so chime plays in parallel
+    import time as _t
+    _transcription = [None]
+    def _do_transcribe():
         t0 = _t.time()
-        segments, info = whisper_model.transcribe(wav_path, beam_size=1, language="en")
-        text = " ".join([s.text.strip() for s in segments]).strip()
-        elapsed = _t.time() - t0
+        segs, _ = whisper_model.transcribe(wav_path, beam_size=1, language="en")
+        _transcription[0] = (" ".join([s.text.strip() for s in segs]).strip(), _t.time() - t0)
+    _tx_thread = threading.Thread(target=_do_transcribe, daemon=True)
+    _tx_thread.start()
+    play_confirm_chime()          # plays while Whisper works
+    _tx_thread.join()             # wait for transcription to finish
+    try:
+        text, elapsed = _transcription[0]
         print(f"Whisper heard: {text} ({elapsed:.1f}s)")
         sys.stdout.flush()
     except Exception as e:
@@ -495,64 +524,64 @@ mic_release = threading.Event()    # set when alarm needs the mic released
 mic_released = threading.Event()   # set when main loop has released the mic
 
 def whisper_check_stop():
-    """Record 2 seconds and check if Whisper hears 'stop'. Returns True if so."""
+    """Record 3 seconds via arecord, transcribe with faster-whisper, return True if dismissal heard."""
+    import wave
     wav_path = "/tmp/sage_stop.wav"
     rec = subprocess.run(
         ["arecord", "-D", MIC_HW_DEVICE, "-f", "S16_LE", "-r", "16000",
-         "-c", "1", "-d", "2", wav_path],
+         "-c", "1", "-d", "3", wav_path],
         capture_output=True
     )
-    play_confirm_chime()
     if rec.returncode != 0:
         return False
-    result = subprocess.run(
-        [WHISPER_CLI, "-m", WHISPER_MODEL, "-f", wav_path,
-         "--no-timestamps", "-t", "4"],
-        capture_output=True, text=True, timeout=15
-    )
-    text = ""
-    for line in result.stdout.strip().splitlines():
-        line = line.strip()
-        if line and not line.startswith("whisper_") and not line.startswith("system_info") and not line.startswith("main:"):
-            text = line.lower()
-    print(f"Whisper stop check: '{text}'")
-    sys.stdout.flush()
-    return "stop" in text
+    try:
+        segments, _ = whisper_model.transcribe(wav_path, beam_size=1, language="en")
+        text = " ".join([s.text.strip() for s in segments]).strip().lower()
+    except Exception as e:
+        print(f"whisper_check_stop error: {e}", flush=True)
+        return False
+    print(f"Alarm stop check: '{text}'", flush=True)
+    dismiss_words = ["stop", "cancel", "dismiss", "silence", "quiet", "enough",
+                     "turn off", "shut up", "done", "okay done", "all done"]
+    return any(w in text for w in dismiss_words)
 
 def play_alarm_loop(stop_event):
-    """Play alarm chimes, pausing periodically to listen for 'stop' via Whisper."""
-    while stop_event.is_set():
-        # Play chime for a few cycles
-        ap = subprocess.Popen(
-            ["aplay", "-r", "22050", "-f", "S16_LE", "-c", "1", "-D", SPEAKER_DEVICE],
-            stdin=subprocess.PIPE, stderr=subprocess.DEVNULL
-        )
-        try:
-            for _ in range(4):
-                if not stop_event.is_set():
-                    break
-                ap.stdin.write(ALARM_PATTERN)
-            ap.stdin.close()
-            ap.wait()
-        except BrokenPipeError:
-            pass
-        if not stop_event.is_set():
-            break
-        # Request mic from main loop
-        mic_released.clear()
-        mic_release.set()
-        mic_released.wait(timeout=3)
-        if not stop_event.is_set():
-            break
-        # Soft prompt tone then listen with Whisper
-        play_confirm_chime()
-        if whisper_check_stop():
-            stop_event.clear()
+    """Play alarm chimes, pausing periodically to listen for dismissal via Whisper."""
+    try:
+        while stop_event.is_set():
+            # Play chime for a few cycles (~6 seconds worth)
+            ap = subprocess.Popen(
+                ["aplay", "-r", "22050", "-f", "S16_LE", "-c", "1", "-D", SPEAKER_DEVICE],
+                stdin=subprocess.PIPE, stderr=subprocess.DEVNULL
+            )
+            try:
+                for _ in range(4):
+                    if not stop_event.is_set():
+                        break
+                    ap.stdin.write(ALARM_PATTERN)
+                ap.stdin.close()
+                ap.wait()
+            except BrokenPipeError:
+                pass
+            if not stop_event.is_set():
+                break
+            # Request mic from main loop
+            mic_released.clear()
+            mic_release.set()
+            mic_released.wait(timeout=3)
+            if not stop_event.is_set():
+                mic_release.clear()
+                break
+            # Listen for dismissal word
+            if whisper_check_stop():
+                stop_event.clear()
+                mic_release.clear()
+                break
+            # Give mic back to main loop and repeat
             mic_release.clear()
-            break
-        # Tell main loop it can have the mic back
+    finally:
+        alarm_playing.clear()
         mic_release.clear()
-    alarm_playing.clear()
 
 # ── Timers ───────────────────────────────────────────────────────────────────
 # Each timer: {"label": str, "seconds": int, "start_time": float,
@@ -699,20 +728,17 @@ reminder_alarming = threading.Event()  # global flag for any reminder going off
 bedtime_mode = threading.Event()  # when set, Sage is in do-not-disturb mode
 
 def enter_bedtime():
-    """Enter bedtime mode — release mic, silence alarms, dim lights, DND."""
+    """Enter bedtime mode — silence alarms, dim lights, DND."""
     bedtime_mode.set()
-    dismiss_alarms()
+    dismiss_alarms()  # stop any active alarms
     lights.set_state("off")
-    # Signal main loop to release the mic
-    mic_release.set()
-    print("Bedtime mode ON — mic released", flush=True)
+    print("Bedtime mode ON", flush=True)
 
 def exit_bedtime():
-    """Exit bedtime mode — reopen mic, resume normal operation."""
+    """Exit bedtime mode — resume normal operation."""
     bedtime_mode.clear()
-    mic_release.clear()  # signal main loop to reopen mic
     lights.set_state("idle")
-    print("Bedtime mode OFF — mic active", flush=True)
+    print("Bedtime mode OFF", flush=True)
 
 def bedtime_scheduler():
     """Auto-enable bedtime at 10pm weekdays, 11:30pm weekends. Auto-wake at 6am."""
@@ -932,6 +958,35 @@ update_thread = threading.Thread(target=update_checker, daemon=True)
 update_thread.start()
 print("Update checker active", flush=True)
 
+# ── Temperature monitor ───────────────────────────────────────────────────────
+def temp_monitor():
+    """Check CPU temp every 3 minutes. Warn at 75°C, critical alert at 82°C."""
+    warned = False   # True once a warning has been sent this hot spell
+    while True:
+        try:
+            with open("/sys/class/thermal/thermal_zone0/temp") as f:
+                temp_c = int(f.read().strip()) / 1000
+            if temp_c >= 82:
+                msg = f"Critical: I'm running at {temp_c:.0f}°C and may slow down or shut off. Please move me somewhere cooler or check my ventilation."
+                speak(msg)
+                send_notification(f"🔥 CPU at {temp_c:.0f}°C — critical! Risk of throttling.", title="Sage Overheat", force=True)
+                warned = True
+            elif temp_c >= 75:
+                if not warned:
+                    msg = f"Heads up — I'm running a bit warm at {temp_c:.0f} degrees. You may want to make sure I have some airflow."
+                    speak(msg)
+                    send_notification(f"⚠️ CPU at {temp_c:.0f}°C — running warm.", title="Sage Temperature", force=True)
+                    warned = True
+            else:
+                warned = False  # cooled down, reset so we can warn again next spike
+        except Exception as e:
+            print(f"Temp monitor error: {e}", flush=True)
+        time.sleep(180)
+
+temp_thread = threading.Thread(target=temp_monitor, daemon=True)
+temp_thread.start()
+print("Temperature monitor active", flush=True)
+
 # Start reminder scheduler thread
 reminder_thread = threading.Thread(target=reminder_scheduler, daemon=True)
 reminder_thread.start()
@@ -959,7 +1014,7 @@ def handle_command(text):
                 speak("No active timers to cancel")
             return
         # Spotify pause
-        if "stop" in text or "pause" in text:
+        if ("stop" in text or "pause" in text) and sp:
             try:
                 sp.pause_playback()
                 speak("Paused")
@@ -972,7 +1027,9 @@ def handle_command(text):
     # Whisper often hears "timer" as "times", "time", "time for", etc.
     # Preset timers loaded from ~/.sage_config.json
 
-    has_timer_intent = ("timer" in text or "times" in text or
+    # "times" only counts as timer-intent when NOT sandwiched by digits (multiplication)
+    times_is_timer = bool(re.search(r"\btimes\b", text)) and not bool(re.search(r"\d\s*times|times\s*\d", text))
+    has_timer_intent = ("timer" in text or times_is_timer or
                         re.search(r"time\s+for\s+\d+", text) or
                         re.search(r"\d+\s*(second|minute|hour)", text))
 
@@ -1216,45 +1273,128 @@ def handle_command(text):
             print(f"Weather error: {e}", flush=True)
             speak("Sorry, I couldn't get the weather right now.")
         return
-    # Spotify — "play Fleetwood Mac"
-    if "play" in text:
-        query = text.replace("play", "").strip()
-        if query:
-            try:
-                results = sp.search(q=query, type="artist", limit=1)
-                items = results["artists"]["items"]
-                if items:
-                    uri = items[0]["uri"]
-                    name = items[0]["name"]
-                    devices = sp.devices()["devices"]
-                    if devices:
-                        sp.start_playback(device_id=devices[0]["id"], context_uri=uri)
-                        speak(f"Playing {name}")
-                    else:
-                        speak("No active Spotify device found. Open Spotify and select Sage as the speaker first.")
+    # Spotify — play, pause, skip, resume, volume, what's playing
+    if sp and ("play" in text or "pause" in text or "resume" in text or "skip" in text
+               or "next" in text or "previous" in text or "volume" in text
+               or "what's playing" in text or "what is playing" in text
+               or "what song" in text or "stop the music" in text or "stop music" in text):
+
+        def _get_device():
+            devices = sp.devices()["devices"]
+            if not devices:
+                return None
+            # Prefer the local raspotify device ("Sage")
+            for d in devices:
+                if "sage" in d.get("name", "").lower():
+                    return d["id"]
+            return devices[0]["id"]
+
+        try:
+            # Pause / stop music
+            if "pause" in text or "stop the music" in text or "stop music" in text:
+                sp.pause_playback()
+                speak("Paused")
+                return
+
+            # Resume
+            if "resume" in text:
+                dev = _get_device()
+                if dev:
+                    sp.start_playback(device_id=dev)
+                    speak("Resuming")
                 else:
-                    speak(f"Could not find {query} on Spotify")
-            except Exception as e:
-                print(f"Spotify error: {e}")
-                sys.stdout.flush()
-                speak("Spotify is not working right now. Please check the authentication.")
-                send_notification(f"Spotify error: {e}. Check OAuth credentials.", title="Spotify")
-        return
+                    speak("No active Spotify device found.")
+                return
 
-    if "pause" in text:
-        try:
-            sp.pause_playback()
-            speak("Paused")
-        except Exception:
-            pass
-        return
+            # Skip / next
+            if "next" in text or "skip" in text:
+                sp.next_track()
+                speak("Skipping")
+                return
 
-    if "next" in text or "skip" in text:
-        try:
-            sp.next_track()
-            speak("Skipping")
-        except Exception:
-            pass
+            # Previous
+            if "previous" in text or "go back" in text:
+                sp.previous_track()
+                speak("Going back")
+                return
+
+            # Volume
+            if "volume" in text:
+                import re as _re
+                nums = _re.findall(r'\d+', text)
+                if nums:
+                    vol = max(0, min(100, int(nums[0])))
+                    sp.volume(vol)
+                    speak(f"Volume set to {vol}")
+                elif "up" in text:
+                    sp.volume(min(100, (sp.current_playback() or {}).get("device", {}).get("volume_percent", 50) + 15))
+                    speak("Volume up")
+                elif "down" in text:
+                    sp.volume(max(0, (sp.current_playback() or {}).get("device", {}).get("volume_percent", 50) - 15))
+                    speak("Volume down")
+                return
+
+            # What's playing
+            if "what" in text and ("playing" in text or "song" in text):
+                current = sp.current_playback()
+                if current and current.get("item"):
+                    track = current["item"]["name"]
+                    artist = current["item"]["artists"][0]["name"]
+                    speak(f"Now playing {track} by {artist}")
+                else:
+                    speak("Nothing is playing right now.")
+                return
+
+            # Play — search for query (try track first, then artist, then playlist)
+            if "play" in text:
+                query = text.replace("play", "").strip()
+                if not query:
+                    # No query — just resume
+                    dev = _get_device()
+                    if dev:
+                        sp.start_playback(device_id=dev)
+                        speak("Resuming")
+                    return
+
+                dev = _get_device()
+                if not dev:
+                    speak("No active Spotify device found. Open Spotify on your phone or computer first.")
+                    return
+
+                # Try track search first
+                results = sp.search(q=query, type="track", limit=1)
+                tracks = results.get("tracks", {}).get("items", [])
+                if tracks:
+                    track = tracks[0]
+                    sp.start_playback(device_id=dev, uris=[track["uri"]])
+                    speak(f"Playing {track['name']} by {track['artists'][0]['name']}")
+                    return
+
+                # Try artist
+                results = sp.search(q=query, type="artist", limit=1)
+                artists = results.get("artists", {}).get("items", [])
+                if artists:
+                    sp.start_playback(device_id=dev, context_uri=artists[0]["uri"])
+                    speak(f"Playing {artists[0]['name']}")
+                    return
+
+                # Try playlist
+                results = sp.search(q=query, type="playlist", limit=1)
+                playlists = results.get("playlists", {}).get("items", [])
+                if playlists:
+                    sp.start_playback(device_id=dev, context_uri=playlists[0]["uri"])
+                    speak(f"Playing playlist {playlists[0]['name']}")
+                    return
+
+                speak(f"Could not find {query} on Spotify")
+
+        except Exception as e:
+            print(f"Spotify error: {e}", flush=True)
+            if "No active device" in str(e) or "404" in str(e):
+                speak("No active Spotify device found. Open Spotify on your phone or computer first.")
+            else:
+                speak("Spotify ran into an issue. Please try again.")
+                send_notification(f"Spotify error: {e}", title="Spotify")
         return
 
     # Calendar briefing
@@ -1481,10 +1621,11 @@ def handle_command(text):
             cleaned = re.sub(r"[^0-9\.\+\-\*/\(\)sqrtoo ]", " ", math_text).strip()
             if cleaned:
                 result = parse_expr(cleaned, transformations=standard_transformations + (implicit_multiplication_application,))
-                result = N(result)  # evaluate numerically
-                if result == int(result):
-                    result = int(result)
-                speak(f"That's {result}.")
+                numerical = float(N(result))
+                if numerical == int(numerical):
+                    speak(f"That's {int(numerical)}.")
+                else:
+                    speak(f"That's {round(numerical, 4)}.")
                 return
         except Exception as e:
             print(f"Math error: {e}", flush=True)
@@ -1514,12 +1655,34 @@ except Exception as e:
 
 rec = KaldiRecognizer(model, VOSK_RATE)
 
+# Load openWakeWord feature extractor (shared by both models)
+oww_features = None
+try:
+    from openwakeword.utils import AudioFeatures
+    oww_features = AudioFeatures()
+    print("OWW audio features ready", flush=True)
+except Exception as e:
+    print(f"OWW features not loaded: {e}", flush=True)
+
+# Load hey_sage wake word model
+oww_session = None
+oww_input_name = None
+OWW_THRESHOLD = 0.45  # lowered to catch wake word from ~12 feet away
+try:
+    import onnxruntime as _ort
+    oww_session = _ort.InferenceSession("/home/sage/hey_sage.onnx")
+    oww_input_name = oww_session.get_inputs()[0].name
+    print("Wake word model ready (hey sage)", flush=True)
+except Exception as e:
+    print(f"hey_sage model not loaded: {e}", flush=True)
+
 # Load hey_claude wake word model
 oww_claude_session = None
 oww_claude_input = None
-OWW_CLAUDE_THRESHOLD = 0.5
+OWW_CLAUDE_THRESHOLD = 0.90
 try:
-    import onnxruntime as _ort; oww_claude_session = _ort.InferenceSession("/home/sage/hey_claude.onnx")
+    import onnxruntime as _ort
+    oww_claude_session = _ort.InferenceSession("/home/sage/hey_claude.onnx")
     oww_claude_input = oww_claude_session.get_inputs()[0].name
     print("Wake word model ready (hey claude)", flush=True)
 except Exception as e:
@@ -1554,13 +1717,18 @@ stream = p.open(
 )
 
 # ── Wake words ───────────────────────────────────────────────────────────────
-CLAUDE_WAKE_WORDS = ["claude", "hey claude", "hey cloud", "cloud", "hey clod", "a club", "club", "make lot", "de clawed", "the clod", "hey cool", "a claude",
-                    "clawed", "hey clawed", "clod", "quad"]
+CLAUDE_WAKE_WORDS = ["hey claude", "hey cloud", "hey clod", "hey clawed", "hey cool", "a claude"]
 
-WAKE_WORDS = ["sage", "age", "ames", "hey sage", "hey age", "hey page", "page",
-              "thieves", "days", "games", "the age", "saves", "say", "sane",
-              "safe", "stage", "cage", "the sage", "save", "dave", "fade",
-              "paid", "theme", "leaves", "reeves"]
+WAKE_WORDS = [
+    # Direct
+    "sage", "hey sage",
+    # Observed Vosk mishearings in this kitchen (from live logs)
+    "hey say", "a say", "his age", "if age", "a stage",
+    "hey suit", "who suit", "ice age", "hey age", "hey page",
+    "the sage", "a sage", "hey face", "hey space",
+    "they say", "hey say",
+    "thieves",
+]
 
 # ── Main loop ────────────────────────────────────────────────────────────────
 print("Sage is listening...")
@@ -1576,15 +1744,14 @@ else:
 lights.set_state("idle")
 
 while True:
-    # Check if something needs the mic released (alarm or bedtime)
+    # Check if alarm thread needs the mic
     if mic_release.is_set():
         stream.stop_stream()
         stream.close()
         mic_released.set()
-        # Wait until mic is needed again
+        # Wait until alarm thread is done with mic
         while mic_release.is_set():
-            time.sleep(0.5)
-        mic_released.clear()
+            time.sleep(0.1)
         # Reopen mic
         stream = p.open(
             format=pyaudio.paInt16,
@@ -1595,8 +1762,6 @@ while True:
             frames_per_buffer=8192
         )
         rec.Reset()
-        oww_audio_buffer = np.zeros(32000, dtype=np.int16)
-        print("Mic reopened", flush=True)
         continue
 
     # Skip Vosk during alarm (chime playing)
@@ -1609,73 +1774,57 @@ while True:
 
     data_raw = stream.read(4096, exception_on_overflow=False)
     rms = audioop.rms(data_raw, 2)
-    # Downsample from 44100 to 16000 for Vosk
+    # Downsample to 16k for both Vosk and OWW
+    data16k_bytes = audioop.ratecv(data_raw, 2, 1, MIC_RATE, 16000, None)[0]
     data = audioop.ratecv(data_raw, 2, 1, MIC_RATE, VOSK_RATE, None)[0]
+
+    # ── OWW: update rolling buffer and check every ~1s (every 11 chunks) ──────
+    chunk_16k = np.frombuffer(data16k_bytes, dtype=np.int16)
+    oww_audio_buffer = np.roll(oww_audio_buffer, -len(chunk_16k))
+    oww_audio_buffer[-len(chunk_16k):] = chunk_16k[:len(oww_audio_buffer)]
+
+    oww_detected = False
+    oww_claude_detected = False
+    if not hasattr(whisper_listen, '_oww_counter'):
+        whisper_listen._oww_counter = 0
+    whisper_listen._oww_counter += 1
+    if whisper_listen._oww_counter >= 11 and oww_features and oww_session:
+        whisper_listen._oww_counter = 0
+        try:
+            embeddings = oww_features.embed_clips(oww_audio_buffer.reshape(1, -1), batch_size=1)
+            emb_flat = np.array(embeddings).reshape(1, -1).astype(np.float32)
+            oww_score = oww_session.run(None, {oww_input_name: emb_flat})[0][0][0]
+            if oww_score > 0.3:
+                print(f"Hey Sage OWW score: {oww_score:.3f}{'  *** TRIGGERED ***' if oww_score > OWW_THRESHOLD else ''}", flush=True)
+            if oww_score > OWW_THRESHOLD:
+                oww_detected = True
+                oww_audio_buffer = np.zeros(32000, dtype=np.int16)
+            if oww_claude_session and not oww_detected:
+                claude_score = oww_claude_session.run(None, {oww_claude_input: emb_flat})[0][0][0]
+                if claude_score > 0.3:
+                    print(f"Claude OWW score: {claude_score:.3f}", flush=True)
+                if claude_score > OWW_CLAUDE_THRESHOLD:
+                    oww_claude_detected = True
+                    print(f"Claude OWW triggered: {claude_score:.3f}", flush=True)
+                    oww_audio_buffer = np.zeros(32000, dtype=np.int16)
+        except Exception:
+            pass
+
+    # ── Vosk: full utterance detection ───────────────────────────────────────
+    text = ""
+    vosk_detected = False
+    claude_detected = False
     if rec.AcceptWaveform(data):
         result = json.loads(rec.Result())
         text = result.get("text", "")
         if text:
             print(f"Heard: {text} (energy: {rms})")
             sys.stdout.flush()
-
-        # Feed audio to openWakeWord for wake word detection
-        data16k_bytes = audioop.ratecv(data_raw, 2, 1, MIC_RATE, 16000, None)[0]
-        chunk_16k = np.frombuffer(data16k_bytes, dtype=np.int16)
-        oww_audio_buffer = np.roll(oww_audio_buffer, -len(chunk_16k))
-        oww_audio_buffer[-len(chunk_16k):] = chunk_16k[:len(oww_audio_buffer[-len(chunk_16k):])]
-
-        oww_detected = False
-        # Only run OWW check every ~1 second (every 10 audio reads)
-        if not hasattr(whisper_listen, '_oww_counter'):
-            whisper_listen._oww_counter = 0
-        whisper_listen._oww_counter += 1
-        if whisper_listen._oww_counter >= 25:
-            whisper_listen._oww_counter = 0
-            try:
-                embeddings = oww_features.embed_clips(oww_audio_buffer.reshape(1, -1), batch_size=1)
-                emb_flat = np.array(embeddings).reshape(1, -1).astype(np.float32)
-                oww_score = oww_session.run(None, {oww_input_name: emb_flat})[0][0][0]
-                if oww_score > OWW_THRESHOLD:
-                    oww_detected = True
-                    oww_audio_buffer = np.zeros(32000, dtype=np.int16)
-                # Also check Claude OWW with the same embeddings
-                if oww_claude_session and not oww_detected:
-                    claude_score = oww_claude_session.run(None, {oww_claude_input: emb_flat})[0][0][0]
-                    if claude_score > 0.3:
-                        print(f"Claude OWW score: {claude_score:.3f}", flush=True)
-                    if claude_score > OWW_CLAUDE_THRESHOLD:
-                        oww_claude_detected = True
-                        print(f"Claude wake word detected! (OWW score: {claude_score:.3f})", flush=True)
-                        oww_audio_buffer = np.zeros(32000, dtype=np.int16)
-
-
-            except Exception:
-                pass
-
-        vosk_detected = text and any(w in text.lower() for w in WAKE_WORDS)
-
-        # Wake word detected — switch to Whisper for command
-        # Check for Claude wake word via openWakeWord
-        oww_claude_detected = False
-        if oww_claude_session:
-            try:
-                emb_flat = np.array(oww_features.embed_clips(oww_audio_buffer.reshape(1, -1), batch_size=1)).reshape(1, -1).astype(np.float32)
-                claude_score = oww_claude_session.run(None, {oww_claude_input: emb_flat})[0][0][0]
-                if claude_score > 0.01:
-                    print(f"Claude OWW score: {claude_score:.3f}", flush=True)
-                if claude_score > OWW_CLAUDE_THRESHOLD:
-                    oww_claude_detected = True
-                    print(f"Claude wake word detected! (OWW score: {claude_score:.3f})")
-                    sys.stdout.flush()
-                    oww_audio_buffer = np.zeros(32000, dtype=np.int16)
-
-
-            except Exception:
-                pass
-
-        # Check for Claude wake word via Vosk
-        claude_detected = text and any(w in text.lower() for w in CLAUDE_WAKE_WORDS)
-        if (oww_claude_detected or claude_detected) and claude_client:
+        vosk_detected = any(w in text.lower() for w in WAKE_WORDS)
+        claude_detected = any(w in text.lower() for w in CLAUDE_WAKE_WORDS)
+        # Claude requires BOTH OWW + Vosk to agree, or Vosk alone with a "hey claude" phrase
+        # OWW alone is too noisy — background sounds trigger it
+        if claude_detected and claude_client and not (oww_detected or vosk_detected):
             print(f"Claude wake word detected!")
             sys.stdout.flush()
             stream.stop_stream()
@@ -1683,30 +1832,35 @@ while True:
             lights.set_state("claude")
             # ── Claude conversation loop ──
             in_conversation = True
-            empty_count = 0
+            last_activity = time.time()
+            CLAUDE_IDLE_TIMEOUT = 8  # seconds of silence → auto-exit
             play_claude_chime()  # "I'm listening" chime
             while in_conversation:
-                command = whisper_listen()
+                command = whisper_listen(max_seconds=10)
                 if not command or command.strip() == "" or "[blank" in command.lower():
-                    empty_count += 1
-                    if empty_count >= 3:
-                        speak("Alright, I'll be here if you need me.")
+                    if time.time() - last_activity > CLAUDE_IDLE_TIMEOUT:
+                        speak_claude("Alright, I'll let you go.")
                         in_conversation = False
                         break
-                    # Chime to indicate still listening
+                    # Still within idle window — chime and listen again
                     play_claude_chime()
                     continue
-                empty_count = 0
+                last_activity = time.time()
                 cmd_lower = command.lower()
                 # Exit phrases
-                if any(w in cmd_lower for w in ["goodbye", "bye", "that's all", "never mind", "nevermind", "done", "thank you claude", "thanks claude"]):
-                    speak(random.choice(["See you later!", "Bye for now!", "Anytime!"]))
+                if any(w in cmd_lower for w in ["goodbye", "bye", "that's all", "that is all", "never mind", "nevermind", "thank you claude", "thanks claude", "all done", "that'll do"]):
+                    speak_claude(random.choice(["See you later!", "Bye for now!", "Anytime!"]))
                     in_conversation = False
                     break
-                # Switch to Sage
+                # Switch to Sage — listen for the actual command
                 if any(w in cmd_lower for w in ["hey sage", "sage set", "sage what"]):
-                    speak("Handing you back to Sage.")
+                    speak("Switching to Sage — go ahead.")
                     in_conversation = False
+                    lights.set_state("wake")
+                    followup = whisper_listen()
+                    if followup:
+                        handle_command(followup)
+                    lights.set_state("idle")
                     break
                 # Check if this is a Sage command — hand off seamlessly
                 sage_keywords = ["timer", "time for", "times for", "alarm",
@@ -1717,6 +1871,9 @@ while True:
                                  "firewall", "status",
                                  "goodnight", "good night", "bedtime",
                                  "good morning", "wake up",
+                                 "play", "pause", "resume", "skip", "next",
+                                 "previous", "volume", "what's playing",
+                                 "what song", "stop music",
                                  "stop", "cancel"]
                 if any(kw in cmd_lower for kw in sage_keywords):
                     print(f"Claude handing off to Sage: {command}", flush=True)
@@ -1734,7 +1891,8 @@ while True:
                 answer = ask_claude(command)
                 print(f"Claude says: {answer}", flush=True)
                 lights.set_state("claude")
-                speak(answer)
+                speak_claude(answer)
+                last_activity = time.time()  # reset idle clock after Claude speaks
                 # Ready for follow-up chime
                 play_claude_chime()
             lights.set_state("idle")
@@ -1760,14 +1918,20 @@ while True:
             # Fully close the mic so arecord can use the device
             stream.stop_stream()
             stream.close()
-            # Record and transcribe with Whisper (plays chime internally)
-            command = whisper_listen()
+            greeting = random.choice([
+                "How can I assist?",
+                "What can I do for you?",
+                "Go ahead.",
+                "I'm listening.",
+                "Yes?",
+            ])
+            command = whisper_listen(spoken_prompt=greeting)
             if command:
                 handle_command(command)
                 lights.set_state("success")
             else:
                 # One gentle retry
-                speak(random.choice(["I'm still here.", "Go ahead, I'm listening.", "Try again, I'm ready."]))
+                speak(random.choice(["I'm still here.", "Go ahead.", "Try again."]))
                 command = whisper_listen()
                 if command:
                     handle_command(command)
