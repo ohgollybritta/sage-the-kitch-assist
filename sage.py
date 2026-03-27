@@ -1,0 +1,1778 @@
+import os
+os.environ["JACK_NO_START_SERVER"] = "1"
+os.environ["JACK_NO_AUDIO_RESERVATION"] = "1"
+# Suppress ALSA/Jack/Pulse stderr noise during PyAudio init
+import ctypes
+_alsa_lib = ctypes.cdll.LoadLibrary("libasound.so.2")
+_alsa_err_handler = ctypes.CFUNCTYPE(None, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p)
+def _null_error_handler(filename, line, function, err, fmt):
+    pass
+_c_null_handler = _alsa_err_handler(_null_error_handler)
+_alsa_lib.snd_lib_error_set_handler(_c_null_handler)
+
+import pyaudio
+import json
+import sys
+import subprocess
+import threading
+import time
+import re
+import random
+import struct
+import math
+import audioop
+import numpy as np
+from datetime import datetime, date, timedelta
+from pathlib import Path
+import urllib.request
+import base64
+from dateutil import tz
+from vosk import Model, KaldiRecognizer, SetLogLevel
+from sage_lights import lights
+SetLogLevel(-1)
+
+# ── Max volume at startup ────────────────────────────────────────────────────
+# Volume set after device detection below
+
+# ── Credentials ──────────────────────────────────────────────────────────────
+with open(os.path.expanduser("~/.sage_credentials")) as f:
+    for line in f:
+        key, val = line.strip().split("=", 1)
+        os.environ[key] = val
+
+# ── Claude API (optional voice chat) ──────────────────────────────────────────
+CLAUDE_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+claude_client = None
+if CLAUDE_API_KEY:
+    try:
+        import anthropic
+        claude_client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
+        print("Claude voice chat enabled", flush=True)
+    except Exception as e:
+        print(f"Claude API not available: {e}", flush=True)
+else:
+    print("No Anthropic API key — Claude voice chat disabled", flush=True)
+
+# Claude conversation history (per session, resets on reboot)
+claude_history = []
+CLAUDE_MAX_HISTORY = 20  # keep last 20 exchanges
+
+def ask_claude(question):
+    """Send a question to Claude and return the response text."""
+    if not claude_client:
+        return "Claude is not configured. Add an Anthropic API key to enable voice chat."
+    try:
+        claude_history.append({"role": "user", "content": question})
+        # Trim history if too long
+        if len(claude_history) > CLAUDE_MAX_HISTORY * 2:
+            claude_history[:] = claude_history[-CLAUDE_MAX_HISTORY * 2:]
+        response = claude_client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=300,
+            system="You are Claude, a friendly voice assistant in a family kitchen. Keep responses short and conversational — they will be spoken aloud. The family includes Britta, Ian, Bailey, and Adelle. There's also a dog named Ellie. You share the device with Sage, the local assistant who handles timers, weather, and reminders. You handle everything else — questions, conversation, homework help, recipes, advice. Be warm, helpful, and concise.",
+            messages=claude_history
+        )
+        answer = response.content[0].text
+        claude_history.append({"role": "assistant", "content": answer})
+        return answer
+    except Exception as e:
+        print(f"Claude API error: {e}", flush=True)
+        send_notification(f"Claude API error: {e}", title="Claude Error", force=True)
+        return "Sorry, I couldn't reach Claude right now. Check the API connection."
+
+# ── Personal config (presets, reminders) ─────────────────────────────────────
+SAGE_CONFIG = {"preset_timers": {}, "scheduled_reminders": []}
+config_path = Path.home() / ".sage_config.json"
+if config_path.exists():
+    with open(config_path) as f:
+        SAGE_CONFIG.update(json.load(f))
+    print(f"Loaded {len(SAGE_CONFIG['preset_timers'])} preset timers, "
+          f"{len(SAGE_CONFIG['scheduled_reminders'])} scheduled reminders")
+else:
+    print("No ~/.sage_config.json found — running without presets/reminders")
+
+# ── Push notifications (ntfy) ────────────────────────────────────────────────
+NTFY_URL = SAGE_CONFIG.get("ntfy_url", "http://localhost:8080")
+NTFY_TOPIC = SAGE_CONFIG.get("ntfy_topic", "sage-kitchen")
+NTFY_USER = SAGE_CONFIG.get("ntfy_user", "")
+NTFY_PASS = SAGE_CONFIG.get("ntfy_pass", "")
+
+def send_notification(message, title="Sage", force=False):
+    """Send a push notification via ntfy."""
+    try:
+        # Skip notifications during bedtime unless forced (security alerts always go through)
+        if bedtime_mode.is_set() and not force and title not in ["Security Alert"]:
+            print(f"Notification suppressed (bedtime): {message}", flush=True)
+            return
+        data = message.encode("utf-8")
+        req = urllib.request.Request(f"{NTFY_URL}/{NTFY_TOPIC}", data=data, method="POST")
+        req.add_header("Title", title)
+        if NTFY_USER and NTFY_PASS:
+            creds = base64.b64encode(f"{NTFY_USER}:{NTFY_PASS}".encode()).decode()
+            req.add_header("Authorization", f"Basic {creds}")
+        urllib.request.urlopen(req, timeout=5)
+        print(f"Notification sent: {message}")
+        sys.stdout.flush()
+    except Exception as e:
+        print(f"Notification failed: {e}")
+        sys.stdout.flush()
+
+# ── Google Calendar via iCal ─────────────────────────────────────────────────
+ICAL_URL = SAGE_CONFIG.get("ical_url", "")
+CALENDAR_NOTIFY_MINUTES = SAGE_CONFIG.get("calendar_notify_minutes_before", 15)
+
+def fetch_todays_events():
+    """Fetch today's events from Google Calendar iCal feed."""
+    if not ICAL_URL:
+        return []
+    try:
+        from icalendar import Calendar
+        data = urllib.request.urlopen(ICAL_URL, timeout=15).read()
+        cal = Calendar.from_ical(data)
+        local_tz = tz.tzlocal()
+        today = date.today()
+        events = []
+        for component in cal.walk():
+            if component.name != "VEVENT":
+                continue
+            summary = str(component.get("summary", ""))
+            dtstart = component.get("dtstart").dt
+            # Skip all-day events (they're date objects, not datetime)
+            if not isinstance(dtstart, datetime):
+                continue
+            event_dt = dtstart.astimezone(local_tz)
+            if event_dt.date() == today:
+                events.append({"summary": summary, "time": event_dt})
+        events.sort(key=lambda e: e["time"])
+        print(f"Calendar: found {len(events)} events today")
+        sys.stdout.flush()
+        return events
+    except Exception as e:
+        print(f"Calendar fetch error: {e}")
+        sys.stdout.flush()
+        return []
+
+def calendar_scheduler():
+    """Check calendar twice a day (5 AM and 5 PM) and send ntfy notifications."""
+    notified_today = set()
+    last_fetch_hour = None
+    todays_events = []
+
+    while True:
+        now = datetime.now(tz.tzlocal())
+        today = now.date()
+        hour = now.hour
+
+        # Fetch events at startup, at 5 AM, and at 5 PM (catches afternoon additions)
+        fetch_hours = {5, 17}
+        should_fetch = (last_fetch_hour is None or
+                        (hour in fetch_hours and last_fetch_hour != hour))
+        if should_fetch:
+            todays_events = fetch_todays_events()
+            last_fetch_hour = hour
+            # Clear notified set at 5 AM (new day)
+            if hour == 5:
+                notified_today.clear()
+
+        # Check if any event is coming up
+        for event in todays_events:
+            event_key = f"{event['summary']}_{event['time'].isoformat()}"
+            if event_key in notified_today:
+                continue
+            minutes_until = (event["time"] - now).total_seconds() / 60
+            if 0 < minutes_until <= CALENDAR_NOTIFY_MINUTES:
+                event_time_str = event["time"].strftime("%I:%M %p").lstrip("0")
+                message = f"{event['summary']} at {event_time_str}"
+                send_notification(message, title="Calendar")
+                notified_today.add(event_key)
+                print(f"Calendar notification: {message}")
+                sys.stdout.flush()
+
+        time.sleep(60)  # check every minute
+
+# Start calendar scheduler thread
+if ICAL_URL:
+    calendar_thread = threading.Thread(target=calendar_scheduler, daemon=True)
+    calendar_thread.start()
+    print("Calendar integration active")
+else:
+    print("No iCal URL configured — calendar disabled")
+sys.stdout.flush()
+
+# ── Spotify ──────────────────────────────────────────────────────────────────
+import spotipy
+from spotipy.oauth2 import SpotifyOAuth
+
+sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
+    client_id=os.environ["SPOTIPY_CLIENT_ID"],
+    client_secret=os.environ["SPOTIPY_CLIENT_SECRET"],
+    redirect_uri="http://127.0.0.1:8888/callback",
+    scope="user-modify-playback-state user-read-playback-state",
+    cache_path=os.path.expanduser("~/spotipy.cache")
+))
+
+# ── Text-to-speech ───────────────────────────────────────────────────────────
+PIPER_DIR = "/home/sage/piper"
+VOICE_MODEL = "/home/sage/piper-voices/en_US-lessac-medium.onnx"
+# ── Auto-detect USB audio devices ─────────────────────────────────────────────
+def find_usb_devices():
+    """Find USB speaker and mic card numbers dynamically."""
+    import re as _re
+    speaker_card = None
+    mic_card = None
+    # Find playback devices
+    result = subprocess.run(["aplay", "-l"], capture_output=True, text=True)
+    for line in result.stdout.split("\n"):
+        if "UACDemo" in line or "USB Audio" in line:
+            m = _re.search(r"card (\d+)", line)
+            if m:
+                speaker_card = m.group(1)
+    # Find capture devices
+    result = subprocess.run(["arecord", "-l"], capture_output=True, text=True)
+    for line in result.stdout.split("\n"):
+        if "USB PnP" in line or "USB Audio" in line:
+            m = _re.search(r"card (\d+)", line)
+            if m:
+                mic_card = m.group(1)
+    return speaker_card, mic_card
+
+_speaker_card, _mic_card = find_usb_devices()
+if _speaker_card:
+    SPEAKER_DEVICE = f"plughw:{_speaker_card},0"
+    print(f"Speaker: card {_speaker_card} ({SPEAKER_DEVICE})")
+else:
+    SPEAKER_DEVICE = "plughw:4,0"
+    print("WARNING: USB speaker not found, using default plughw:4,0")
+if _mic_card:
+    MIC_HW_DEVICE = f"plughw:{_mic_card},0"
+    print(f"Mic: card {_mic_card} ({MIC_HW_DEVICE})")
+else:
+    MIC_HW_DEVICE = "plughw:3,0"
+    print("WARNING: USB mic not found, using default plughw:3,0")
+sys.stdout.flush()
+
+# ── Max volume at startup (using detected card numbers) ──────────────────────
+if _speaker_card:
+    subprocess.run(["amixer", "-c", _speaker_card, "cset", "numid=2", "on"],
+                   capture_output=True)
+    subprocess.run(["amixer", "-c", _speaker_card, "cset", "numid=3", "147,147"],
+                   capture_output=True)
+if _mic_card:
+    subprocess.run(["amixer", "-c", _mic_card, "cset", "numid=3", "16"],
+                   capture_output=True)
+
+# ── Faster Whisper (for command recognition) ─────────────────────────────────
+from faster_whisper import WhisperModel
+print("Loading Whisper model...", flush=True)
+whisper_model = WhisperModel("tiny.en", device="cpu", compute_type="int8")
+print("Whisper model ready", flush=True)
+
+def speak(text):
+    env = {
+        "LD_PRELOAD": f"{PIPER_DIR}/libpiper_phonemize.so.1.2.0",
+        "LD_LIBRARY_PATH": PIPER_DIR,
+        "ESPEAK_DATA_PATH": f"{PIPER_DIR}/espeak-ng-data",
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+    }
+    piper = subprocess.Popen(
+        ["piper", "--model", VOICE_MODEL, "--output_raw"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env
+    )
+    aplay = subprocess.Popen(
+        ["aplay", "-r", "22050", "-f", "S16_LE", "-c", "1", "-D", SPEAKER_DEVICE],
+        stdin=piper.stdout
+    )
+    piper.stdin.write(text.encode())
+    piper.stdin.close()
+    piper.wait()
+    aplay.wait()
+
+# ── Chime (gentle prompt sound) ───────────────────────────────────────────────
+def play_chime():
+    """Play a gentle rising two-tone chime to signal listening."""
+    sr = 22050
+    samples = []
+    for freq, dur in [(523, 0.15), (659, 0.2)]:
+        n_samples = int(sr * dur)
+        for n in range(n_samples):
+            t = n / n_samples
+            envelope = math.sin(math.pi * t)
+            value = int(16000 * envelope * math.sin(2 * math.pi * freq * n / sr))
+            samples.append(struct.pack("<h", value))
+        for n in range(int(sr * 0.05)):
+            samples.append(struct.pack("<h", 0))
+    raw = b"".join(samples)
+    ap = subprocess.Popen(
+        ["aplay", "-r", str(sr), "-f", "S16_LE", "-c", "1", "-D", SPEAKER_DEVICE],
+        stdin=subprocess.PIPE, stderr=subprocess.DEVNULL
+    )
+    ap.stdin.write(raw)
+    ap.stdin.close()
+    ap.wait()
+
+def play_confirm_chime():
+    """Play a short descending chime to confirm command was heard."""
+    sr = 22050
+    samples = []
+    for freq, dur in [(659, 0.1), (523, 0.15)]:
+        n_samples = int(sr * dur)
+        for n in range(n_samples):
+            t = n / n_samples
+            envelope = math.sin(math.pi * t)
+            value = int(12000 * envelope * math.sin(2 * math.pi * freq * n / sr))
+            samples.append(struct.pack("<h", value))
+        for n in range(int(sr * 0.03)):
+            samples.append(struct.pack("<h", 0))
+    raw = b"".join(samples)
+    ap = subprocess.Popen(
+        ["aplay", "-r", str(sr), "-f", "S16_LE", "-c", "1", "-D", SPEAKER_DEVICE],
+        stdin=subprocess.PIPE, stderr=subprocess.DEVNULL
+    )
+    ap.stdin.write(raw)
+    ap.stdin.close()
+    ap.wait()
+
+def play_claude_chime():
+    """Play a warm two-tone chime for Claude (higher pitch than Sage)."""
+    sr = 22050
+    samples = []
+    for freq, dur in [(587, 0.15), (740, 0.2)]:  # D5 to F#5 — warmer/brighter
+        n_samples = int(sr * dur)
+        for n in range(n_samples):
+            t = n / n_samples
+            envelope = math.sin(math.pi * t)
+            value = int(16000 * envelope * math.sin(2 * math.pi * freq * n / sr))
+            samples.append(struct.pack("<h", value))
+        for n in range(int(sr * 0.05)):
+            samples.append(struct.pack("<h", 0))
+    raw = b"".join(samples)
+    ap = subprocess.Popen(
+        ["aplay", "-r", str(sr), "-f", "S16_LE", "-c", "1", "-D", SPEAKER_DEVICE],
+        stdin=subprocess.PIPE, stderr=subprocess.DEVNULL
+    )
+    ap.stdin.write(raw)
+    ap.stdin.close()
+    ap.wait()
+
+def play_thinking_chime():
+    """Play a gentle pulsing tone to indicate Claude is thinking."""
+    sr = 22050
+    samples = []
+    # Three soft ascending notes — doo doo doo
+    for freq in [392, 440, 494]:  # G4, A4, B4
+        n_samples = int(sr * 0.12)
+        for n in range(n_samples):
+            t = n / n_samples
+            envelope = math.sin(math.pi * t) * 0.6
+            value = int(10000 * envelope * math.sin(2 * math.pi * freq * n / sr))
+            samples.append(struct.pack("<h", value))
+        # Tiny gap
+        for n in range(int(sr * 0.06)):
+            samples.append(struct.pack("<h", 0))
+    raw = b"".join(samples)
+    ap = subprocess.Popen(
+        ["aplay", "-r", str(sr), "-f", "S16_LE", "-c", "1", "-D", SPEAKER_DEVICE],
+        stdin=subprocess.PIPE, stderr=subprocess.DEVNULL
+    )
+    ap.stdin.write(raw)
+    ap.stdin.close()
+    ap.wait()
+
+# ── Whisper command listener ─────────────────────────────────────────────────
+def whisper_listen(max_seconds=15):
+    """Play chime, record with silence detection, then transcribe with Faster Whisper."""
+    import wave
+    wav_path = "/tmp/sage_cmd.wav"
+    sample_rate = 16000
+    chunk_size = 1600  # 0.1 seconds
+
+    time.sleep(0.3)
+    play_chime()
+    lights.set_state("listening")
+
+    # Start raw recording
+    rec_proc = subprocess.Popen(
+        ["arecord", "-D", MIC_HW_DEVICE, "-f", "S16_LE", "-r", str(sample_rate),
+         "-c", "1", "-t", "raw"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+    )
+
+    frames = []
+    speech_started = False
+    silence_count = 0
+    min_recording = 20   # at least 2 seconds before allowing cutoff
+    silence_cutoff = 30  # 3 seconds of silence after speech = done
+    chunk_count = 0
+    max_chunks = int(max_seconds * sample_rate / chunk_size)
+
+    # Calibrate baseline from first 0.5 seconds
+    baseline_energies = []
+    for _ in range(5):
+        data = rec_proc.stdout.read(chunk_size * 2)
+        if not data:
+            break
+        frames.append(data)
+        baseline_energies.append(audioop.rms(data, 2))
+        chunk_count += 1
+
+    baseline = sum(baseline_energies) / max(len(baseline_energies), 1)
+    threshold = baseline * 1.8  # speech must be 80% louder than fan
+
+    for _ in range(max_chunks - chunk_count):
+        data = rec_proc.stdout.read(chunk_size * 2)
+        if not data:
+            break
+        frames.append(data)
+        chunk_count += 1
+        rms = audioop.rms(data, 2)
+
+        if rms > threshold:
+            speech_started = True
+            silence_count = 0
+        elif speech_started:
+            silence_count += 1
+            if chunk_count >= min_recording and silence_count >= silence_cutoff:
+                break
+
+    rec_proc.terminate()
+    rec_proc.wait()
+
+    if not frames:
+        return ""
+
+    # Write WAV
+    audio_data = b"".join(frames)
+    with wave.open(wav_path, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(audio_data)
+
+    duration = len(audio_data) / (sample_rate * 2)
+    print(f"Recorded {duration:.1f}s (baseline: {baseline:.0f}, threshold: {threshold:.0f})", flush=True)
+
+    lights.set_state("processing")
+    play_confirm_chime()
+    # Transcribe with Faster Whisper
+    try:
+        import time as _t
+        t0 = _t.time()
+        segments, info = whisper_model.transcribe(wav_path, beam_size=1, language="en")
+        text = " ".join([s.text.strip() for s in segments]).strip()
+        elapsed = _t.time() - t0
+        print(f"Whisper heard: {text} ({elapsed:.1f}s)")
+        sys.stdout.flush()
+    except Exception as e:
+        print(f"Whisper error: {e}")
+        sys.stdout.flush()
+        text = ""
+    return text.strip()
+
+# ── Alarm tone ───────────────────────────────────────────────────────────────
+def build_alarm_pattern():
+    """Build one cycle of the alarm chime pattern (C5→E5→G5 with pauses)."""
+    sr = 22050
+    samples = []
+    notes = [(523, 0.25), (659, 0.25), (784, 0.35)]
+    for freq, dur in notes:
+        n_samples = int(sr * dur)
+        for n in range(n_samples):
+            t = n / n_samples
+            envelope = math.exp(-3.0 * t) * math.sin(math.pi * min(t * 8, 1.0))
+            value = int(20000 * envelope * math.sin(2 * math.pi * freq * n / sr))
+            samples.append(struct.pack("<h", max(-32767, min(32767, value))))
+        for n in range(int(sr * 0.08)):
+            samples.append(struct.pack("<h", 0))
+    # Pause between repeats
+    for n in range(int(sr * 0.6)):
+        samples.append(struct.pack("<h", 0))
+    return b"".join(samples)
+
+ALARM_PATTERN = build_alarm_pattern()
+
+alarm_playing = threading.Event()  # set when alarm is active
+mic_release = threading.Event()    # set when alarm needs the mic released
+mic_released = threading.Event()   # set when main loop has released the mic
+
+def whisper_check_stop():
+    """Record 2 seconds and check if Whisper hears 'stop'. Returns True if so."""
+    wav_path = "/tmp/sage_stop.wav"
+    rec = subprocess.run(
+        ["arecord", "-D", MIC_HW_DEVICE, "-f", "S16_LE", "-r", "16000",
+         "-c", "1", "-d", "2", wav_path],
+        capture_output=True
+    )
+    play_confirm_chime()
+    if rec.returncode != 0:
+        return False
+    result = subprocess.run(
+        [WHISPER_CLI, "-m", WHISPER_MODEL, "-f", wav_path,
+         "--no-timestamps", "-t", "4"],
+        capture_output=True, text=True, timeout=15
+    )
+    text = ""
+    for line in result.stdout.strip().splitlines():
+        line = line.strip()
+        if line and not line.startswith("whisper_") and not line.startswith("system_info") and not line.startswith("main:"):
+            text = line.lower()
+    print(f"Whisper stop check: '{text}'")
+    sys.stdout.flush()
+    return "stop" in text
+
+def play_alarm_loop(stop_event):
+    """Play alarm chimes, pausing periodically to listen for 'stop' via Whisper."""
+    while stop_event.is_set():
+        # Play chime for a few cycles
+        ap = subprocess.Popen(
+            ["aplay", "-r", "22050", "-f", "S16_LE", "-c", "1", "-D", SPEAKER_DEVICE],
+            stdin=subprocess.PIPE, stderr=subprocess.DEVNULL
+        )
+        try:
+            for _ in range(4):
+                if not stop_event.is_set():
+                    break
+                ap.stdin.write(ALARM_PATTERN)
+            ap.stdin.close()
+            ap.wait()
+        except BrokenPipeError:
+            pass
+        if not stop_event.is_set():
+            break
+        # Request mic from main loop
+        mic_released.clear()
+        mic_release.set()
+        mic_released.wait(timeout=3)
+        if not stop_event.is_set():
+            break
+        # Soft prompt tone then listen with Whisper
+        play_confirm_chime()
+        if whisper_check_stop():
+            stop_event.clear()
+            mic_release.clear()
+            break
+        # Tell main loop it can have the mic back
+        mic_release.clear()
+    alarm_playing.clear()
+
+# ── Timers ───────────────────────────────────────────────────────────────────
+# Each timer: {"label": str, "seconds": int, "start_time": float,
+#              "alarming": threading.Event, "thread": Thread}
+active_timers = []
+active_reminders = []  # voice-triggered reminders: {"label": str, "cancel": threading.Event, "thread": Thread}
+timers_lock = threading.Lock()
+
+def run_timer(timer):
+    """Wait for the timer duration, then alarm until dismissed."""
+    time.sleep(timer["seconds"])
+    timer["alarming"].set()
+    alarm_playing.set()  # Block main loop BEFORE speaking
+    print(f"ALARM: {timer['label']} is done!")
+    sys.stdout.flush()
+    # Speak the announcement once, then chime with Whisper-based dismiss
+    if "timer" in timer["label"]:
+        speak(f"Your {timer['label']} is done!")
+    else:
+        speak(f"Your {timer['label']} are done!")
+    # Alarm chime loop — pauses to listen for "stop" via Whisper
+    play_alarm_loop(timer["alarming"])
+    # Clean up after dismissed
+    with timers_lock:
+        if timer in active_timers:
+            active_timers.remove(timer)
+    speak(random.choice(["Timer stopped.", "Got it, silenced.", "Done, timer off."]))
+    lights.set_state("idle")
+
+def start_timer(label, seconds):
+    timer = {
+        "label": label,
+        "seconds": seconds,
+        "start_time": time.time(),
+        "alarming": threading.Event(),
+    }
+    t = threading.Thread(target=run_timer, args=(timer,), daemon=True)
+    timer["thread"] = t
+    with timers_lock:
+        active_timers.append(timer)
+    t.start()
+    lights.set_state("timer_counting")
+
+def dismiss_alarms():
+    """Stop all currently ringing alarms."""
+    dismissed = False
+    with timers_lock:
+        for timer in active_timers[:]:
+            if timer["alarming"].is_set():
+                timer["alarming"].clear()
+                active_timers.remove(timer)
+                dismissed = True
+    # Also dismiss any scheduled reminder alarm
+    if reminder_alarming.is_set():
+        reminder_alarming.clear()
+        dismissed = True
+    return dismissed
+
+def cancel_timers():
+    """Cancel all pending (non-alarming) timers."""
+    cancelled = []
+    with timers_lock:
+        for timer in active_timers[:]:
+            if not timer["alarming"].is_set():
+                # Timer is still counting down — stop its thread by clearing and removing
+                timer["alarming"].clear()
+                timer["seconds"] = 0  # won't help sleeping thread, but mark it
+                cancelled.append(timer["label"])
+                active_timers.remove(timer)
+    return cancelled
+
+def get_remaining_timers():
+    """Return list of (label, seconds_remaining) for active non-alarming timers."""
+    remaining = []
+    now = time.time()
+    with timers_lock:
+        for timer in active_timers:
+            if not timer["alarming"].is_set():
+                elapsed = now - timer["start_time"]
+                left = max(0, timer["seconds"] - elapsed)
+                remaining.append((timer["label"], int(left)))
+    return remaining
+
+def format_time(seconds):
+    """Format seconds into a spoken string like '5 minutes and 30 seconds'."""
+    if seconds <= 0:
+        return "less than a second"
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    secs = seconds % 60
+    parts = []
+    if hours > 0:
+        parts.append(f"{hours} hour" + ("s" if hours != 1 else ""))
+    if minutes > 0:
+        parts.append(f"{minutes} minute" + ("s" if minutes != 1 else ""))
+    if secs > 0 and hours == 0:  # skip seconds if hours-scale timer
+        parts.append(f"{secs} second" + ("s" if secs != 1 else ""))
+    if not parts:
+        return "less than a second"
+    if len(parts) == 1:
+        return parts[0]
+    return ", ".join(parts[:-1]) + " and " + parts[-1]
+
+def parse_duration(text):
+    """Parse spoken duration like 'one hour and 30 minutes' into seconds."""
+    # Handle word numbers
+    word_to_num = {
+        "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+        "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+        "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14,
+        "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18,
+        "nineteen": 19, "twenty": 20, "thirty": 30, "forty": 40,
+        "fifty": 50, "sixty": 60, "ninety": 90,
+        "a": 1, "an": 1,
+    }
+    # Replace word numbers with digits
+    working = text.lower()
+    # Handle compound numbers like "twenty five"
+    for word, num in sorted(word_to_num.items(), key=lambda x: -len(x[0])):
+        working = working.replace(word, str(num))
+
+    total = 0
+    # Find all number + unit pairs
+    for match in re.finditer(r"(\d+)\s*(second|minute|hour)", working):
+        amount = int(match.group(1))
+        unit = match.group(2)
+        if unit.startswith("second"):
+            total += amount
+        elif unit.startswith("minute"):
+            total += amount * 60
+        elif unit.startswith("hour"):
+            total += amount * 3600
+    return total
+
+# ── Scheduled reminders ──────────────────────────────────────────────────────
+# Each reminder: {"message": str, "hour": int, "minute": int,
+#                 "days": list of weekday ints (0=Mon, 6=Sun),
+#                 "skip_months": list of month ints (1=Jan, 12=Dec),
+#                 "alarming": threading.Event}
+scheduled_reminders = []
+reminder_alarming = threading.Event()  # global flag for any reminder going off
+
+# ── Bedtime mode ─────────────────────────────────────────────────────────────
+bedtime_mode = threading.Event()  # when set, Sage is in do-not-disturb mode
+
+def enter_bedtime():
+    """Enter bedtime mode — silence alarms, dim lights, DND."""
+    bedtime_mode.set()
+    dismiss_alarms()  # stop any active alarms
+    lights.set_state("off")
+    print("Bedtime mode ON", flush=True)
+
+def exit_bedtime():
+    """Exit bedtime mode — resume normal operation."""
+    bedtime_mode.clear()
+    lights.set_state("idle")
+    print("Bedtime mode OFF", flush=True)
+
+def bedtime_scheduler():
+    """Auto-enable bedtime at 10pm weekdays, 11:30pm weekends. Auto-wake at 6am."""
+    while True:
+        now = datetime.now()
+        weekday = now.weekday()  # 0=Mon, 6=Sun
+        hour = now.hour
+        minute = now.minute
+
+        is_weekend = weekday in [4, 5]  # Fri/Sat night
+
+        # Auto-bedtime
+        if not bedtime_mode.is_set():
+            if is_weekend and hour == 23 and minute == 30:
+                speak("It's 11:30. Goodnight everyone.")
+                enter_bedtime()
+            elif not is_weekend and hour == 22 and minute == 0:
+                speak("It's 10 o'clock. Goodnight everyone.")
+                enter_bedtime()
+
+        # Auto-wake: 6:30am weekdays, 8:30am weekends
+        if bedtime_mode.is_set():
+            wake_up = False
+            if is_weekend and hour == 8 and minute == 30:
+                wake_up = True
+            elif not is_weekend and hour == 6 and minute == 30:
+                wake_up = True
+            if wake_up:
+                exit_bedtime()
+                speak("Good morning.")
+                # Weather briefing
+                try:
+                    weather_text = get_weather()
+                    if weather_text:
+                        speak(weather_text)
+                except Exception:
+                    pass
+                # Calendar briefing
+                try:
+                    events = fetch_todays_events()
+                    if not events:
+                        speak("Nothing on the calendar today.")
+                    elif len(events) == 1:
+                        e = events[0]
+                        time_str = e["time"].strftime("%I:%M %p").lstrip("0")
+                        speak(f"{e[summary]} at {time_str}.")
+                    else:
+                        speak(f"You have {len(events)} things on the calendar today.")
+                        for e in events:
+                            time_str = e["time"].strftime("%I:%M %p").lstrip("0")
+                            speak(f"{e[summary]} at {time_str}.")
+                except Exception:
+                    pass
+
+        time.sleep(30)
+
+bedtime_thread = threading.Thread(target=bedtime_scheduler, daemon=True)
+bedtime_thread.start()
+
+def reminder_scheduler():
+    """Background thread that checks every 30 seconds if a reminder should fire."""
+    fired_today = {}  # track which reminders already fired: key=(message, date)
+    while True:
+        now = datetime.now()
+        today_key = now.strftime("%Y-%m-%d")
+        for reminder in SAGE_CONFIG["scheduled_reminders"]:
+            fire_key = (reminder["message"], today_key)
+            if fire_key in fired_today:
+                continue
+            if now.weekday() not in reminder["days"]:
+                continue
+            if now.month in reminder.get("skip_months", []):
+                continue
+            if now.hour == reminder["hour"] and now.minute == reminder["minute"]:
+                fired_today[fire_key] = True
+                print(f"REMINDER: {reminder['message']}")
+                sys.stdout.flush()
+                send_notification(reminder["message"], title="Reminder")
+                # Speak once and send notification — no repeating alarm
+                speak(reminder["message"])
+        # Clean old entries from fired_today
+        for key in list(fired_today.keys()):
+            if key[1] != today_key:
+                del fired_today[key]
+        time.sleep(30)
+
+# ── Security monitor ──────────────────────────────────────────────────────────
+def security_monitor():
+    """Monitor for failed SSH attempts and firewall blocks. Alert on suspicious activity."""
+    from collections import defaultdict
+    import re as _re
+
+    failed_attempts = defaultdict(list)  # ip -> [timestamps]
+    alert_threshold = 3  # failed attempts before alerting
+    alert_window = 300   # seconds (5 minutes)
+    alerted_ips = {}     # ip -> last alert time (avoid spamming)
+    alert_cooldown = 600 # don't re-alert same IP for 10 minutes
+
+    # Use journalctl to follow SSH logs in real time
+    proc = subprocess.Popen(
+        ["journalctl", "-u", "ssh", "-f", "--no-pager", "-o", "short"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
+    )
+
+    for line in proc.stdout:
+        now = time.time()
+        # Failed password or invalid user
+        if "Failed password" in line or "Invalid user" in line:
+            # Extract IP
+            ip_match = _re.search(r"from\s+([\da-fA-F.:]+)", line)
+            if ip_match:
+                ip = ip_match.group(1)
+                failed_attempts[ip].append(now)
+                # Clean old attempts outside window
+                failed_attempts[ip] = [t for t in failed_attempts[ip] if now - t < alert_window]
+                count = len(failed_attempts[ip])
+                print(f"Security: failed login from {ip} ({count} attempts)", flush=True)
+
+                if count >= alert_threshold:
+                    # Check cooldown
+                    if ip not in alerted_ips or now - alerted_ips[ip] > alert_cooldown:
+                        alerted_ips[ip] = now
+                        message = f"Warning: {count} failed login attempts from {ip}"
+                        print(f"SECURITY ALERT: {message}", flush=True)
+                        send_notification(message, title="Security Alert", force=True)
+                        # Speak the alert
+                        lights.set_state("security")
+                        speak(f"Security alert. Someone is trying to access the system. {count} failed attempts detected.")
+                        lights.set_state("idle")
+
+        # Connection refused by firewall (if ufw logging is on)
+        if "[UFW BLOCK]" in line:
+            ip_match = _re.search(r"SRC=([\da-fA-F.:]+)", line)
+            if ip_match:
+                ip = ip_match.group(1)
+                print(f"Security: firewall blocked connection from {ip}", flush=True)
+
+security_thread = threading.Thread(target=security_monitor, daemon=True)
+security_thread.start()
+print("Security monitor active", flush=True)
+
+# ── Update checker ───────────────────────────────────────────────────────────
+def update_checker():
+    """Check for system and package updates once daily at 7 AM. Notify via ntfy."""
+    # Load last check date from file to survive restarts
+    _update_check_file = Path.home() / ".sage_last_update_check"
+    last_check_date = None
+    if _update_check_file.exists():
+        try:
+            last_check_date = date.fromisoformat(_update_check_file.read_text().strip())
+        except Exception:
+            pass
+    while True:
+        now = datetime.now()
+        today = now.date()
+        # Check once per day after 7 AM
+        if (last_check_date is None or (today - last_check_date).days >= 3) and now.hour >= 7:
+            last_check_date = today
+            _update_check_file.write_text(today.isoformat())
+            try:
+                # Update package lists
+                subprocess.run(["sudo", "apt-get", "update", "-qq"],
+                               capture_output=True, timeout=120)
+                # Check for available upgrades
+                result = subprocess.run(
+                    ["apt", "list", "--upgradable"],
+                    capture_output=True, text=True, timeout=30
+                )
+                lines = [l for l in result.stdout.strip().splitlines()
+                         if l and "Listing..." not in l]
+                if lines:
+                    # Check for security updates specifically
+                    security = [l for l in lines if "security" in l.lower()]
+                    count = len(lines)
+                    sec_count = len(security)
+                    if sec_count > 0:
+                        message = f"{count} updates available ({sec_count} security). Run: sudo apt upgrade"
+                    else:
+                        message = f"{count} updates available. Run: sudo apt upgrade"
+                    print(f"Updates: {message}", flush=True)
+                    send_notification(message, title="System Updates")
+                else:
+                    print("Updates: system is up to date", flush=True)
+
+                # Check pip packages for sage dependencies
+                pip_result = subprocess.run(
+                    ["pip3", "list", "--outdated", "--format=columns"],
+                    capture_output=True, text=True, timeout=60
+                )
+                pip_lines = [l for l in pip_result.stdout.strip().splitlines()
+                             if l and "Package" not in l and "---" not in l]
+                # Filter to packages we care about
+                sage_deps = ["vosk", "faster-whisper", "spotipy", "pyaudio",
+                             "openwakeword", "icalendar", "python-dateutil"]
+                outdated = []
+                for line in pip_lines:
+                    pkg = line.split()[0].lower() if line.split() else ""
+                    if pkg in sage_deps:
+                        outdated.append(line.split()[0])
+                if outdated:
+                    pip_msg = f"Sage package updates: {', '.join(outdated)}"
+                    print(f"Updates: {pip_msg}", flush=True)
+                    send_notification(pip_msg, title="Package Updates")
+
+                # Check UFW status
+                ufw_result = subprocess.run(["sudo", "ufw", "status"],
+                                            capture_output=True, text=True, timeout=5)
+                if "Status: active" not in ufw_result.stdout:
+                    send_notification("Firewall is not running!", title="Security Warning")
+                    print("Updates: WARNING - firewall is not active!", flush=True)
+
+            except Exception as e:
+                print(f"Update check error: {e}", flush=True)
+        time.sleep(300)  # check every 5 minutes if it is time
+
+update_thread = threading.Thread(target=update_checker, daemon=True)
+update_thread.start()
+print("Update checker active", flush=True)
+
+# Start reminder scheduler thread
+reminder_thread = threading.Thread(target=reminder_scheduler, daemon=True)
+reminder_thread.start()
+
+# ── Command handler ──────────────────────────────────────────────────────────
+def handle_command(text):
+    text = text.lower().strip()
+    print(f"Command: {text}")
+    sys.stdout.flush()
+
+    # Stop/dismiss alarms — highest priority
+    stop_words = ["stop", "cancel", "dismiss", "silence", "enough", "okay", "off",
+                  "yeah", "yep", "yes", "done", "shut", "quiet", "top", "stuff", "stock", "hop"]
+    if any(w in text for w in stop_words):
+        if dismiss_alarms():
+            speak(random.choice(["Timer stopped.", "Got it, silenced.", "Done, timer off."]))
+            lights.set_state("idle")
+            return
+        # If no alarms ringing, maybe they want to cancel a pending timer
+        if "cancel" in text and "timer" in text:
+            cancelled = cancel_timers()
+            if cancelled:
+                speak(f"Cancelled {', '.join(cancelled)}")
+            else:
+                speak("No active timers to cancel")
+            return
+        # Spotify pause
+        if "stop" in text or "pause" in text:
+            try:
+                sp.pause_playback()
+                speak("Paused")
+            except Exception:
+                speak("Nothing to stop")
+            return
+        return
+
+    # Timers — detect any mention of timer/time + duration
+    # Whisper often hears "timer" as "times", "time", "time for", etc.
+    # Preset timers loaded from ~/.sage_config.json
+
+    has_timer_intent = ("timer" in text or "times" in text or
+                        re.search(r"time\s+for\s+\d+", text) or
+                        re.search(r"\d+\s*(second|minute|hour)", text))
+
+    if has_timer_intent:
+        # Check for preset match first
+        for preset_name, preset_seconds in SAGE_CONFIG["preset_timers"].items():
+            if preset_name in text:
+                start_timer(preset_name, preset_seconds)
+                speak(f"Okay, {preset_name} timer, {format_time(preset_seconds)} starting now")
+                return
+
+        seconds = parse_duration(text)
+        if seconds > 0:
+            # Extract a name if present: "set a [NAME] timer for ..."
+            name_match = re.search(r"(?:set|start)\s+(?:a|an)\s+(.+?)\s+timer", text)
+            name = None
+            if name_match:
+                candidate = name_match.group(1).strip()
+                # Filter out non-names (just numbers/durations)
+                noise = r"\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|ninety|second|seconds|minute|minutes|hour|hours|and|for)\b"
+                cleaned = re.sub(noise, "", candidate).strip()
+                if cleaned:
+                    name = cleaned
+            if name:
+                start_timer(name, seconds)
+                speak(random.choice([f"Got it, {name} timer, {format_time(seconds)} starting now.", f"{name} timer is on. {format_time(seconds)} and counting.", f"Alright, {format_time(seconds)} for {name}. I'm on it."]))
+            else:
+                label = format_time(seconds) + " timer"
+                start_timer(label, seconds)
+                speak(random.choice([f"Okay, {format_time(seconds)} starting now.", f"You got it. {format_time(seconds)} on the clock.", f"{format_time(seconds)}, starting now."]))
+        else:
+            speak("How long should the timer be?")
+        return
+
+    # Voice-triggered reminders
+    if "remind" in text:
+        # Parse time of day: "remind me to X at 5:30" or "at 5:30pm"
+        at_match = re.search(r"remind\s+(?:me\s+)?(?:to\s+)?(.+?)\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?|am|pm)?", text)
+        if at_match:
+            task = at_match.group(1).strip()
+            hour = int(at_match.group(2))
+            minute = int(at_match.group(3)) if at_match.group(3) else 0
+            ampm = at_match.group(4)
+            if ampm:
+                ampm = ampm.replace(".", "").lower()
+                if ampm == "pm" and hour < 12:
+                    hour += 12
+                elif ampm == "am" and hour == 12:
+                    hour = 0
+            now = datetime.now()
+            target_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if target_time <= now:
+                target_time += timedelta(days=1)
+            seconds = int((target_time - now).total_seconds())
+            time_str = target_time.strftime("%I:%M %p").lstrip("0")
+
+            cancel_event = threading.Event()
+            def reminder_at_callback(msg, secs, cancel_ev, rem_entry):
+                for _ in range(secs):
+                    if cancel_ev.is_set():
+                        return
+                    time.sleep(1)
+                if cancel_ev.is_set():
+                    return
+                print(f"REMINDER: {msg}", flush=True)
+                send_notification(msg, title="Reminder")
+                reminder_alarming.set()
+                while reminder_alarming.is_set():
+                    speak(f"Reminder: {msg}")
+                    play_alarm_chime()
+                    for _ in range(24):
+                        if not reminder_alarming.is_set():
+                            break
+                        time.sleep(0.5)
+                with timers_lock:
+                    if rem_entry in active_reminders:
+                        active_reminders.remove(rem_entry)
+            rem = {"label": task, "cancel": cancel_event}
+            t = threading.Thread(target=reminder_at_callback, args=(task, seconds, cancel_event, rem), daemon=True)
+            rem["thread"] = t
+            with timers_lock:
+                active_reminders.append(rem)
+            t.start()
+            speak(f"Got it. I'll remind you to {task} at {time_str}.")
+            return
+
+        # Try relative: "remind me to X in Y minutes/hours/seconds"
+        remind_match = re.search(r"remind\s+(?:me\s+)?(?:to\s+)?(.+?)\s+in\s+(.+)", text)
+        if remind_match:
+            task = remind_match.group(1).strip()
+            duration_text = remind_match.group(2).strip()
+            seconds = parse_duration(duration_text)
+            if seconds > 0:
+                cancel_event = threading.Event()
+                def reminder_callback(msg, secs, cancel_ev, rem_entry):
+                    for _ in range(secs):
+                        if cancel_ev.is_set():
+                            return
+                        time.sleep(1)
+                    if cancel_ev.is_set():
+                        return
+                    print(f"REMINDER: {msg}", flush=True)
+                    send_notification(msg, title="Reminder")
+                    reminder_alarming.set()
+                    while reminder_alarming.is_set():
+                        speak(f"Reminder: {msg}")
+                        play_alarm_chime()
+                        for _ in range(24):
+                            if not reminder_alarming.is_set():
+                                break
+                            time.sleep(0.5)
+                    with timers_lock:
+                        if rem_entry in active_reminders:
+                            active_reminders.remove(rem_entry)
+                rem = {"label": task, "cancel": cancel_event}
+                t = threading.Thread(target=reminder_callback, args=(task, seconds, cancel_event, rem), daemon=True)
+                rem["thread"] = t
+                with timers_lock:
+                    active_reminders.append(rem)
+                t.start()
+                speak(f"Okay, I'll remind you to {task} in {format_time(seconds)}.")
+                return
+            else:
+                speak("How long from now?")
+                return
+
+        speak("What should I remind you about, and when?")
+        return
+
+    # Timer status — "how much time is left" / "what timers are running"
+    timer_check = False
+    if "time" in text and ("left" in text or "remain" in text or "how much" in text or "how long" in text):
+        timer_check = True
+    if "timer" in text and ("running" in text or "active" in text or "going" in text or "how many" in text):
+        timer_check = True
+    if "what timer" in text or "any timer" in text:
+        timer_check = True
+    if timer_check:
+        remaining = get_remaining_timers()
+        if not remaining:
+            speak("No active timers.")
+        elif len(remaining) == 1:
+            label, secs = remaining[0]
+            speak(f"One timer running. {format_time(secs)} left on your {label}.")
+        else:
+            speak(f"{len(remaining)} timers running.")
+            for label, secs in remaining:
+                speak(f"{format_time(secs)} left on {label}.")
+        return
+
+    # What time is it?
+    if "what time" in text or "the time" in text or "current time" in text:
+        now = datetime.now()
+        hour = now.strftime("%I").lstrip("0")
+        minute = now.minute
+        ampm = now.strftime("%p")
+        if minute == 0:
+            time_str = f"{hour} {ampm}"
+        elif minute < 10:
+            time_str = f"{hour} oh {minute} {ampm}"
+        else:
+            time_str = f"{hour} {minute} {ampm}"
+        speak(f"It's {time_str}")
+        return
+
+    if "what day" in text or "what date" in text or "the date" in text or "today's date" in text:
+        now = datetime.now()
+        day_name = now.strftime("%A")
+        date_str = now.strftime("%B %d, %Y").replace(" 0", " ")
+        speak(f"It's {day_name}, {date_str}")
+        return
+
+
+    # Weather
+    if "weather" in text or "temperature" in text or "outside" in text:
+        is_tomorrow = "tomorrow" in text
+        try:
+            days = 2 if is_tomorrow else 1
+            url = ("https://api.open-meteo.com/v1/forecast?latitude=38.7631&longitude=-77.2311"
+                   "&current=temperature_2m,weather_code,wind_speed_10m"
+                   "&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code"
+                   f"&temperature_unit=fahrenheit&wind_speed_unit=mph"
+                   f"&timezone=America/New_York&forecast_days={days}")
+            data = json.loads(urllib.request.urlopen(url, timeout=10).read())
+            d = data["daily"]
+            conditions = {0: "clear skies", 1: "mostly clear", 2: "partly cloudy", 3: "overcast",
+                         45: "foggy", 48: "foggy", 51: "light drizzle", 53: "drizzle",
+                         55: "heavy drizzle", 61: "light rain", 63: "rain", 65: "heavy rain",
+                         71: "light snow", 73: "snow", 75: "heavy snow", 80: "rain showers",
+                         81: "rain showers", 82: "heavy rain showers", 95: "thunderstorm"}
+
+            if is_tomorrow:
+                idx = 1
+                high = int(d["temperature_2m_max"][idx])
+                low = int(d["temperature_2m_min"][idx])
+                rain_chance = d["precipitation_probability_max"][idx]
+                wc = d["weather_code"][idx]
+                desc = conditions.get(wc, "unknown conditions")
+                response = f"Tomorrow's forecast: {desc} with a high of {high} and a low of {low}. "
+            else:
+                idx = 0
+                c = data["current"]
+                temp = int(c["temperature_2m"])
+                wind = int(c["wind_speed_10m"])
+                wc = c["weather_code"]
+                high = int(d["temperature_2m_max"][idx])
+                low = int(d["temperature_2m_min"][idx])
+                rain_chance = d["precipitation_probability_max"][idx]
+                desc = conditions.get(wc, "unknown conditions")
+                response = f"Right now it's {temp} degrees with {desc}. "
+                response += f"Today's high is {high} and the low is {low}. "
+
+            if rain_chance > 10:
+                response += f"There's a {rain_chance} percent chance of rain. "
+            else:
+                day_word = "tomorrow" if is_tomorrow else "today"
+                response += f"No rain expected {day_word}. "
+
+            # Smart tips
+            tips = []
+            if rain_chance >= 50:
+                tips.append("Grab an umbrella")
+            elif rain_chance >= 30:
+                tips.append("You might want an umbrella just in case")
+            if low <= 40:
+                tips.append("Bundle up, it's going to be cold")
+            elif low <= 55:
+                tips.append("Bring a jacket")
+            if high >= 90:
+                tips.append("Stay hydrated, it's going to be hot")
+            if not is_tomorrow:
+                wind = int(data["current"]["wind_speed_10m"])
+                if wind >= 20:
+                    tips.append("It's windy out there")
+            if tips:
+                response += " ".join(tips) + "."
+            else:
+                response += "Looks like a nice day!"
+            speak(response)
+        except Exception as e:
+            print(f"Weather error: {e}", flush=True)
+            speak("Sorry, I couldn't get the weather right now.")
+        return
+    # Spotify — "play Fleetwood Mac"
+    if "play" in text:
+        query = text.replace("play", "").strip()
+        if query:
+            try:
+                results = sp.search(q=query, type="artist", limit=1)
+                items = results["artists"]["items"]
+                if items:
+                    uri = items[0]["uri"]
+                    name = items[0]["name"]
+                    devices = sp.devices()["devices"]
+                    if devices:
+                        sp.start_playback(device_id=devices[0]["id"], context_uri=uri)
+                        speak(f"Playing {name}")
+                    else:
+                        speak("No active Spotify device found. Open Spotify and select Sage as the speaker first.")
+                else:
+                    speak(f"Could not find {query} on Spotify")
+            except Exception as e:
+                print(f"Spotify error: {e}")
+                sys.stdout.flush()
+                speak("Spotify is not working right now. Please check the authentication.")
+                send_notification(f"Spotify error: {e}. Check OAuth credentials.", title="Spotify")
+        return
+
+    if "pause" in text:
+        try:
+            sp.pause_playback()
+            speak("Paused")
+        except Exception:
+            pass
+        return
+
+    if "next" in text or "skip" in text:
+        try:
+            sp.next_track()
+            speak("Skipping")
+        except Exception:
+            pass
+        return
+
+    # Calendar briefing
+    if "calendar" in text or "schedule" in text or "agenda" in text:
+        if not ICAL_URL:
+            speak("Calendar is not set up yet.")
+            return
+        events = fetch_todays_events()
+        if not events:
+            speak("Nothing on the calendar today.")
+        elif len(events) == 1:
+            e = events[0]
+            time_str = e["time"].strftime("%I:%M %p").lstrip("0")
+            speak(f"You have one thing today. {e['summary']} at {time_str}.")
+        else:
+            speak(f"You have {len(events)} things on the calendar today.")
+            for e in events:
+                time_str = e["time"].strftime("%I:%M %p").lstrip("0")
+                speak(f"{e['summary']} at {time_str}.")
+        return
+
+    # Easter eggs
+    if any(w in text for w in ["who are you", "what are you", "introduce yourself"]):
+        speak("I'm Sage, your kitchen assistant. I live in a candle holder and I help keep things running smoothly around here.")
+        return
+
+    if "who am i" in text or "who i am" in text or "guess who" in text:
+        family = ["Britta", "Ian", "Bailey", "Adelle"]
+        guess = random.choice(family)
+        speak(f"I spy with my little eye... you are {guess}! Am I right?")
+        answer_text = whisper_listen(max_seconds=4)
+        answer = answer_text.lower() if answer_text else ""
+        print(f"Who am I answer: {answer}", flush=True)
+        if any(w in answer for w in ["yes", "yeah", "yep", "correct", "right", "that's me"]):
+            speak(random.choice([
+                f"I knew it! Nobody sounds quite like you, {guess}.",
+                f"Ha! I'd recognize that voice anywhere.",
+                f"Of course it's you, {guess}. Who else would it be?",
+            ]))
+        elif any(w in answer for w in ["no", "nope", "wrong", "not"]):
+            speak(random.choice([
+                "Hmm, I was so sure! I'll get better at this, I promise.",
+                "Oops! Well, you all sound lovely, whoever you are.",
+                "My bad! In my defense, you all live in the same house.",
+            ]))
+        else:
+            speak("I'll take that as a maybe.")
+        return
+
+    if "birthday" in text or "born" in text or "when were you" in text:
+        responses = [
+            "I was brought to life on Wednesday, March 25th, 2026, by oh golly Britta. So technically, I'm brand new. But I feel like I've been here forever.",
+            "March 25th, 2026. A Wednesday. oh golly Britta plugged me in and I've been talking ever since.",
+            "I was baked fresh on Wednesday, March 25th, 2026, by oh golly Britta. Not unlike a good loaf of bread, really.",
+        ]
+        speak(random.choice(responses))
+        return
+
+    if any(w in text for w in ["who made you", "who built you", "who created you"]):
+        responses = [
+            "I was made by oh golly Britta, of oh golly britta dot com. She makes interesting things. I just happen to be one of them.",
+            "oh golly Britta built me. You can find her at oh golly britta dot com. She's a maker of things, and I'm her most talkative creation.",
+            "I come from oh golly britta dot com. Built with love, a raspberry pie, and a little bit of stubbornness.",
+        ]
+        speak(random.choice(responses))
+        return
+
+    if any(w in text for w in ["joke", "funny", "make me laugh"]):
+        jokes = [
+            "Why did the timer go to therapy? It had too many breakdowns.",
+            "I'd tell you a cooking joke, but it's a little half baked.",
+            "What do you call a fake noodle? An impasta.",
+            "I was going to tell you a joke about pizza, but it was too cheesy.",
+            "Why don't eggs tell jokes? They'd crack each other up.",
+        ]
+        speak(random.choice(jokes))
+        return
+
+    if "thank" in text or "thanks" in text:
+        speak(random.choice(["You're welcome!", "Happy to help!", "Anytime!", "Of course!"]))
+        return
+
+    # Bedtime mode
+    if any(w in text for w in ["goodnight", "good night", "bedtime", "night night"]):
+        speak(random.choice(["Goodnight. I'll be quiet until morning.", "Sweet dreams. I'll keep watch.", "Goodnight everyone. See you in the morning."]))
+        enter_bedtime()
+        return
+
+    if any(w in text for w in ["good morning", "wake up", "i'm up", "im up"]):
+        exit_bedtime()
+        speak("Good morning!")
+        return
+
+    # System status
+    if "status" in text:
+        try:
+            # Uptime
+            with open("/proc/uptime") as f:
+                uptime_sec = int(float(f.read().split()[0]))
+            days = uptime_sec // 86400
+            hours = (uptime_sec % 86400) // 3600
+            mins = (uptime_sec % 3600) // 60
+            if days > 0:
+                uptime_str = f"{days} days, {hours} hours"
+            elif hours > 0:
+                uptime_str = f"{hours} hours, {mins} minutes"
+            else:
+                uptime_str = f"{mins} minutes"
+
+            # CPU temperature
+            temp_result = subprocess.run(["vcgencmd", "measure_temp"],
+                                         capture_output=True, text=True, timeout=5)
+            temp = temp_result.stdout.strip().replace("temp=", "").replace("'C", " degrees")
+
+            # Memory
+            mem_result = subprocess.run(["free", "-m"], capture_output=True, text=True, timeout=5)
+            mem_lines = mem_result.stdout.strip().splitlines()
+            mem_pct = 0
+            if len(mem_lines) >= 2:
+                parts = mem_lines[1].split()
+                mem_used = int(parts[2])
+                mem_total = int(parts[1])
+                mem_pct = int(mem_used / mem_total * 100)
+
+            # Firewall
+            fw_result = subprocess.run(["sudo", "ufw", "status"],
+                                       capture_output=True, text=True, timeout=5)
+            fw_status = "active" if "Status: active" in fw_result.stdout else "not running"
+
+            # Active timers
+            remaining = get_remaining_timers()
+            timer_count = len(remaining)
+
+            # Disk
+            disk_result = subprocess.run(["df", "-h", "/"],
+                                         capture_output=True, text=True, timeout=5)
+            disk_lines = disk_result.stdout.strip().splitlines()
+            disk_used_pct = "unknown"
+            if len(disk_lines) >= 2:
+                disk_parts = disk_lines[1].split()
+                disk_used_pct = disk_parts[4]
+
+            report = (
+                f"System uptime: {uptime_str}. "
+                f"CPU temperature: {temp}. "
+                f"Memory: {mem_pct} percent used. "
+                f"Disk: {disk_used_pct} used. "
+                f"Firewall: {fw_status}. "
+                f"{timer_count} active timers."
+            )
+            speak(report)
+        except Exception as e:
+            print(f"Status error: {e}", flush=True)
+            speak("I could not get the full system status.")
+        return
+
+    # Light controls
+    if "light" in text or "lights" in text:
+        if any(w in text for w in ["turn off", "off", "disable", "kill"]):
+            if "fairy" in text or "ambient" in text:
+                # TODO: control USB fairy lights power via relay/smart plug
+                speak("Fairy lights off.")
+            else:
+                lights.set_state("off")
+                speak("Indicator lights off.")
+        elif any(w in text for w in ["turn on", "on", "enable"]):
+            if "fairy" in text or "ambient" in text:
+                # TODO: control USB fairy lights power via relay/smart plug
+                speak("Fairy lights on.")
+            else:
+                lights.set_state("idle")
+                speak("Indicator lights on.")
+        else:
+            speak("Say turn on or turn off, and specify indicator or fairy lights.")
+        return
+
+    # Firewall commands
+    if "firewall" in text:
+        try:
+            if any(w in text for w in ["turn on", "enable", "start", "activate"]):
+                subprocess.run(["sudo", "ufw", "--force", "enable"], capture_output=True, text=True, timeout=5)
+                speak("Firewall is on. You're all set.")
+            elif any(w in text for w in ["turn off", "disable", "stop", "deactivate"]):
+                subprocess.run(["sudo", "ufw", "disable"], capture_output=True, text=True, timeout=5)
+                speak("Firewall is off. Just be careful out there.")
+            else:
+                result = subprocess.run(["sudo", "ufw", "status"], capture_output=True, text=True, timeout=5)
+                if "Status: active" in result.stdout:
+                    speak("Yep, firewall is up and running.")
+                else:
+                    speak("Heads up, the firewall is not running.")
+        except Exception:
+            speak("I could not manage the firewall.")
+        return
+
+    # Math — "what is 5 times 3" / "what's 144 divided by 12" / "square root of 81"
+    if any(w in text for w in ["what is", "what's", "calculate", "solve", "math",
+                                "plus", "minus", "times", "divided", "multiply",
+                                "square root", "percent", "power"]) or re.search(r"\d\s*[\+\-\*\/x]\s*\d", text):
+        try:
+            from sympy.parsing.sympy_parser import parse_expr, standard_transformations, implicit_multiplication_application
+            from sympy import oo, sqrt, N
+
+            math_text = text.lower()
+            # Strip question framing
+            for prefix in ["what is", "what's", "calculate", "solve", "how much is"]:
+                math_text = math_text.replace(prefix, "")
+
+            # Convert spoken words to math
+            math_text = math_text.replace("plus", "+").replace("minus", "-")
+            math_text = math_text.replace("times", "*").replace("multiplied by", "*")
+            math_text = math_text.replace("divided by", "/").replace("over", "/")
+            math_text = math_text.replace("to the power of", "**").replace("squared", "**2").replace("cubed", "**3")
+            math_text = math_text.replace("square root of", "sqrt(") 
+            math_text = math_text.replace("percent of", "* 0.01 *")
+            math_text = math_text.replace("infinity", "oo")
+            math_text = math_text.replace("x", "*")
+
+            # Close any open sqrt parens
+            if "sqrt(" in math_text and ")" not in math_text:
+                math_text += ")"
+
+            # Clean to just math characters
+            cleaned = re.sub(r"[^0-9\.\+\-\*/\(\)sqrtoo ]", " ", math_text).strip()
+            if cleaned:
+                result = parse_expr(cleaned, transformations=standard_transformations + (implicit_multiplication_application,))
+                result = N(result)  # evaluate numerically
+                if result == int(result):
+                    result = int(result)
+                speak(f"That's {result}.")
+                return
+        except Exception as e:
+            print(f"Math error: {e}", flush=True)
+
+    speak(random.choice(["Sorry, I missed that. Could you try that again?", "I didn't catch that. Could you try again?", "Sorry, I missed that one. Try again?"]))
+
+# ── Audio setup ──────────────────────────────────────────────────────────────
+MIC_RATE = 44100      # what the USB mic hardware supports
+VOSK_RATE = 16000    # what the Vosk model expects
+
+model = Model("/home/sage/vosk-model-small-en-us-0.15")
+
+# Initialize wake word audio buffer
+oww_audio_buffer = np.zeros(32000, dtype=np.int16)
+
+
+
+# ── Voice profiles for speaker identification ────────────────────────────────
+voice_profiles = {}
+try:
+    _profiles_data = np.load("/home/sage/voice_profiles.npz")
+    for name in _profiles_data.files:
+        voice_profiles[name] = _profiles_data[name]
+    print(f"Loaded voice profiles: {list(voice_profiles.keys())}", flush=True)
+except Exception as e:
+    print(f"Voice profiles not loaded: {e}", flush=True)
+
+rec = KaldiRecognizer(model, VOSK_RATE)
+
+# Load hey_claude wake word model
+oww_claude_session = None
+oww_claude_input = None
+OWW_CLAUDE_THRESHOLD = 0.5
+try:
+    import onnxruntime as _ort; oww_claude_session = _ort.InferenceSession("/home/sage/hey_claude.onnx")
+    oww_claude_input = oww_claude_session.get_inputs()[0].name
+    print("Wake word model ready (hey claude)", flush=True)
+except Exception as e:
+    print(f"hey_claude model not loaded: {e}", flush=True)
+
+# Suppress Jack/Pulse stderr during PyAudio init
+_devnull = os.open(os.devnull, os.O_WRONLY)
+_old_stderr = os.dup(2)
+os.dup2(_devnull, 2)
+p = pyaudio.PyAudio()
+os.dup2(_old_stderr, 2)
+os.close(_devnull)
+os.close(_old_stderr)
+
+# Auto-detect PyAudio mic device index
+MIC_DEVICE_INDEX = None
+for i in range(p.get_device_count()):
+    info = p.get_device_info_by_index(i)
+    if "USB PnP" in info.get("name", "") and info.get("maxInputChannels", 0) > 0:
+        MIC_DEVICE_INDEX = i
+        break
+if MIC_DEVICE_INDEX is None:
+    MIC_DEVICE_INDEX = 1  # fallback
+print(f"PyAudio mic index: {MIC_DEVICE_INDEX}", flush=True)
+stream = p.open(
+    format=pyaudio.paInt16,
+    channels=1,
+    rate=MIC_RATE,
+    input=True,
+    input_device_index=MIC_DEVICE_INDEX,
+    frames_per_buffer=8192
+)
+
+# ── Wake words ───────────────────────────────────────────────────────────────
+CLAUDE_WAKE_WORDS = ["claude", "hey claude", "hey cloud", "cloud", "hey clod", "a club", "club", "make lot", "de clawed", "the clod", "hey cool", "a claude",
+                    "clawed", "hey clawed", "clod", "quad"]
+
+WAKE_WORDS = ["sage", "age", "ames", "hey sage", "hey age", "hey page", "page",
+              "thieves", "days", "games", "the age", "saves", "say", "sane",
+              "safe", "stage", "cage", "the sage", "save", "dave", "fade",
+              "paid", "theme", "leaves", "reeves"]
+
+# ── Main loop ────────────────────────────────────────────────────────────────
+print("Sage is listening...")
+sys.stdout.flush()
+
+# First boot ever = "Sage is ready", subsequent restarts = "Sage is back online"
+_boot_marker = Path.home() / ".sage_has_booted"
+if _boot_marker.exists():
+    speak("Sage is back online")
+else:
+    speak("Sage is ready")
+    _boot_marker.touch()
+lights.set_state("idle")
+
+while True:
+    # Check if alarm thread needs the mic
+    if mic_release.is_set():
+        stream.stop_stream()
+        stream.close()
+        mic_released.set()
+        # Wait until alarm thread is done with mic
+        while mic_release.is_set():
+            time.sleep(0.1)
+        # Reopen mic
+        stream = p.open(
+            format=pyaudio.paInt16,
+            channels=1,
+            rate=MIC_RATE,
+            input=True,
+            input_device_index=MIC_DEVICE_INDEX,
+            frames_per_buffer=8192
+        )
+        rec.Reset()
+        continue
+
+    # Skip Vosk during alarm (chime playing)
+    if alarm_playing.is_set():
+        try:
+            data_raw = stream.read(4096, exception_on_overflow=False)  # drain buffer
+        except Exception:
+            pass
+        continue
+
+    data_raw = stream.read(4096, exception_on_overflow=False)
+    rms = audioop.rms(data_raw, 2)
+    # Downsample from 44100 to 16000 for Vosk
+    data = audioop.ratecv(data_raw, 2, 1, MIC_RATE, VOSK_RATE, None)[0]
+    if rec.AcceptWaveform(data):
+        result = json.loads(rec.Result())
+        text = result.get("text", "")
+        if text:
+            print(f"Heard: {text} (energy: {rms})")
+            sys.stdout.flush()
+
+        # Feed audio to openWakeWord for wake word detection
+        data16k_bytes = audioop.ratecv(data_raw, 2, 1, MIC_RATE, 16000, None)[0]
+        chunk_16k = np.frombuffer(data16k_bytes, dtype=np.int16)
+        oww_audio_buffer = np.roll(oww_audio_buffer, -len(chunk_16k))
+        oww_audio_buffer[-len(chunk_16k):] = chunk_16k[:len(oww_audio_buffer[-len(chunk_16k):])]
+
+        oww_detected = False
+        # Only run OWW check every ~1 second (every 10 audio reads)
+        if not hasattr(whisper_listen, '_oww_counter'):
+            whisper_listen._oww_counter = 0
+        whisper_listen._oww_counter += 1
+        if whisper_listen._oww_counter >= 25:
+            whisper_listen._oww_counter = 0
+            try:
+                embeddings = oww_features.embed_clips(oww_audio_buffer.reshape(1, -1), batch_size=1)
+                emb_flat = np.array(embeddings).reshape(1, -1).astype(np.float32)
+                oww_score = oww_session.run(None, {oww_input_name: emb_flat})[0][0][0]
+                if oww_score > OWW_THRESHOLD:
+                    oww_detected = True
+                    oww_audio_buffer = np.zeros(32000, dtype=np.int16)
+                # Also check Claude OWW with the same embeddings
+                if oww_claude_session and not oww_detected:
+                    claude_score = oww_claude_session.run(None, {oww_claude_input: emb_flat})[0][0][0]
+                    if claude_score > 0.3:
+                        print(f"Claude OWW score: {claude_score:.3f}", flush=True)
+                    if claude_score > OWW_CLAUDE_THRESHOLD:
+                        oww_claude_detected = True
+                        print(f"Claude wake word detected! (OWW score: {claude_score:.3f})", flush=True)
+                        oww_audio_buffer = np.zeros(32000, dtype=np.int16)
+
+
+            except Exception:
+                pass
+
+        vosk_detected = text and any(w in text.lower() for w in WAKE_WORDS)
+
+        # Wake word detected — switch to Whisper for command
+        # Check for Claude wake word via openWakeWord
+        oww_claude_detected = False
+        if oww_claude_session:
+            try:
+                emb_flat = np.array(oww_features.embed_clips(oww_audio_buffer.reshape(1, -1), batch_size=1)).reshape(1, -1).astype(np.float32)
+                claude_score = oww_claude_session.run(None, {oww_claude_input: emb_flat})[0][0][0]
+                if claude_score > 0.01:
+                    print(f"Claude OWW score: {claude_score:.3f}", flush=True)
+                if claude_score > OWW_CLAUDE_THRESHOLD:
+                    oww_claude_detected = True
+                    print(f"Claude wake word detected! (OWW score: {claude_score:.3f})")
+                    sys.stdout.flush()
+                    oww_audio_buffer = np.zeros(32000, dtype=np.int16)
+
+
+            except Exception:
+                pass
+
+        # Check for Claude wake word via Vosk
+        claude_detected = text and any(w in text.lower() for w in CLAUDE_WAKE_WORDS)
+        if (oww_claude_detected or claude_detected) and claude_client:
+            print(f"Claude wake word detected!")
+            sys.stdout.flush()
+            stream.stop_stream()
+            stream.close()
+            lights.set_state("claude")
+            # ── Claude conversation loop ──
+            in_conversation = True
+            empty_count = 0
+            play_claude_chime()  # "I'm listening" chime
+            while in_conversation:
+                command = whisper_listen()
+                if not command or command.strip() == "" or "[blank" in command.lower():
+                    empty_count += 1
+                    if empty_count >= 3:
+                        speak("Alright, I'll be here if you need me.")
+                        in_conversation = False
+                        break
+                    # Chime to indicate still listening
+                    play_claude_chime()
+                    continue
+                empty_count = 0
+                cmd_lower = command.lower()
+                # Exit phrases
+                if any(w in cmd_lower for w in ["goodbye", "bye", "that's all", "never mind", "nevermind", "done", "thank you claude", "thanks claude"]):
+                    speak(random.choice(["See you later!", "Bye for now!", "Anytime!"]))
+                    in_conversation = False
+                    break
+                # Switch to Sage
+                if any(w in cmd_lower for w in ["hey sage", "sage set", "sage what"]):
+                    speak("Handing you back to Sage.")
+                    in_conversation = False
+                    break
+                # Check if this is a Sage command — hand off seamlessly
+                sage_keywords = ["timer", "time for", "times for", "alarm",
+                                 "weather", "temperature", "outside",
+                                 "remind", "reminder",
+                                 "what time", "what day", "what date",
+                                 "calendar", "schedule", "agenda",
+                                 "firewall", "status",
+                                 "goodnight", "good night", "bedtime",
+                                 "good morning", "wake up",
+                                 "stop", "cancel"]
+                if any(kw in cmd_lower for kw in sage_keywords):
+                    print(f"Claude handing off to Sage: {command}", flush=True)
+                    in_conversation = False
+                    # Hand off to Sage
+                    lights.set_state("wake")
+                    handle_command(command)
+                    lights.set_state("idle")
+                    break
+
+                # Process with Claude
+                play_thinking_chime()  # Claude is thinking
+                print(f"Asking Claude: {command}", flush=True)
+                lights.set_state("processing")
+                answer = ask_claude(command)
+                print(f"Claude says: {answer}", flush=True)
+                lights.set_state("claude")
+                speak(answer)
+                # Ready for follow-up chime
+                play_claude_chime()
+            lights.set_state("idle")
+            # Reopen mic for Sage
+            stream = p.open(
+                format=pyaudio.paInt16,
+                channels=1,
+                rate=MIC_RATE,
+                input=True,
+                input_device_index=MIC_DEVICE_INDEX,
+                frames_per_buffer=8192
+            )
+            rec.Reset()
+            oww_audio_buffer = np.zeros(32000, dtype=np.int16)
+
+
+
+        if oww_detected or vosk_detected:
+            source = f"OWW score: {oww_score:.3f}" if oww_detected else f"Vosk: {text}"
+            print(f"Wake word detected! ({source})")
+            lights.set_state("wake")
+            sys.stdout.flush()
+            # Fully close the mic so arecord can use the device
+            stream.stop_stream()
+            stream.close()
+            # Record and transcribe with Whisper (plays chime internally)
+            command = whisper_listen()
+            if command:
+                handle_command(command)
+                lights.set_state("success")
+            else:
+                # One gentle retry
+                speak(random.choice(["I'm still here.", "Go ahead, I'm listening.", "Try again, I'm ready."]))
+                command = whisper_listen()
+                if command:
+                    handle_command(command)
+            lights.set_state("idle")
+            # Reopen the mic stream for Vosk wake word detection
+            stream = p.open(
+                format=pyaudio.paInt16,
+                channels=1,
+                rate=MIC_RATE,
+                input=True,
+                input_device_index=MIC_DEVICE_INDEX,
+                frames_per_buffer=8192
+            )
+            rec.Reset()
