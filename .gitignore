@@ -1,0 +1,26 @@
+# Credentials & secrets
+.sage_credentials
+spotipy.cache
+spotify_auth.py
+
+# Personal config (presets, reminders, ntfy, calendar)
+.sage_config.json
+
+# Vosk models (too large for git)
+vosk-model-*/
+vosk-model-*.zip
+
+# Piper voices & binaries
+piper/
+piper-voices/
+piper_linux_aarch64.tar.gz
+
+# Python
+__pycache__/
+*.pyc
+
+# System
+.bash_history
+.cache/
+.local/
+voice_profiles.npz
