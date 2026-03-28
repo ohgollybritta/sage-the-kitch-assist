@@ -18,10 +18,16 @@ Sage is that alternative. The voice pipeline runs locally. Audio is never stored
 ## Hardware
 
 - **Raspberry Pi 4** (CanaKit or equivalent)
-- **USB microphone**
-- **USB speaker** (or Bluetooth soundbar)
+- **USB microphone** — any USB mic works out of the box
+- **USB speaker** — any USB speaker works out of the box
 - **WS2812B LED ring** (optional — 24-bit, for visual indicators)
 - **Female-to-female jumper wires** (3 needed for LED ring)
+
+### Recommended: USB speakerphone (optional upgrade)
+
+A **USB conference speakerphone** like the **Jabra SPEAK 510** is optional but highly recommended if you want to use voice commands while music is playing. It combines mic and speaker into one USB device and includes hardware acoustic echo cancellation (AEC), which lets Sage hear "Hey Sage" even while audio is playing through it.
+
+> Sage is hardware-agnostic — it auto-detects your USB mic and speaker on startup. No manual configuration needed for standard setups. If you're using a Jabra SPEAK 510, see [`jabra_config.py`](jabra_config.py) for device-specific settings and notes.
 
 ---
 
@@ -76,20 +82,25 @@ Sage is that alternative. The voice pipeline runs locally. Audio is never stored
 - 🎵 **Spotify playback** — "Play Fleetwood Mac", "Put on some jazz", "Listen to Taylor Swift"
 - 🎵 **Natural phrasing** — understands "play", "put on", "throw on", "listen to", "queue up", "shuffle", "can you play", and more
 - 🎵 **Song, artist, or playlist search** — searches tracks first, then artists, then playlists
+- 🎵 **Play Spotify / Play music** — resumes where you left off, or shuffles liked songs if nothing was previously playing
 - 🎵 **Pause/stop** — "Pause", "Stop the music", "Stop", "Mute"
 - 🎵 **Resume** — "Resume", "Resume music", "Unpause"
 - 🎵 **Skip/previous** — "Skip", "Next", "Previous", "Go back", "Last song"
-- 🎵 **Volume control** — "Volume 50", "Volume up", "Volume down"
+- 🎵 **Volume control** — "Volume 50", "Turn up the volume", "Turn down the volume", "Full volume", "All the way down", "Turn your volume to zero"
+- 🎵 **Default playback volume** — 90% when a song starts
 - 🎵 **Now playing** — "What's playing?", "What song is this?", "Who is this?", "Who sings this?"
 - 🎵 **Auto-pause on wake** — Sage pauses Spotify when it hears "Hey Sage" so it can hear your command, then resumes if the command wasn't music-related
 - 🎵 **Plays through the Pi** — Raspotify turns the Pi into a Spotify Connect speaker
 - 🎵 **Hardcoded device fallback** — if the Spotify API can't find the speaker, Sage falls back to a known device ID and restarts Raspotify automatically
+- 🎵 **Liked songs shuffle** — "Play Spotify" or "Play music" with nothing active shuffles your saved/liked songs
 
 ### Personality
 - 🎭 Varied responses — Sage doesn't repeat the same phrase
 - 😄 Easter eggs — "Tell me a joke", "Who are you?", "Who made you?", "When is your birthday?"
 - 🙏 Says "you're welcome" when you say thanks
 - 👤 **Voice identification** — "Who am I?" (guesses who's talking from voice profiles)
+- 🗣️ **Self-identification on wake** — Sage and Claude both announce who they are when activated (e.g. "Sage here, what's up?" / "Claude here, what's your question?") so you always know who you're talking to
+- ❌ **Dismiss on false wake** — say "nevermind", "cancel", "nothing", "forget it", or "nope" after a false trigger and Sage stands down gracefully
 
 ### Visual Indicators (LED ring)
 - 🟢 **Green** — Sage is idle/listening
@@ -460,15 +471,19 @@ All speech processing happens on-device. Outbound network traffic is limited to:
 | "Put on [artist]" / "Throw on [song]" | Natural play phrases |
 | "Listen to [artist]" / "Queue up [song]" | More natural play phrases |
 | "Play [song] on Spotify" | Explicit Spotify request |
-| "Play music" / "Play something" | Resume or start radio |
+| "Play music" / "Play Spotify" / "Play something" | Resume where left off, or shuffle liked songs |
 | "Pause" / "Stop the music" / "Mute" | Pause playback |
 | "Resume" / "Unpause" | Resume playback |
 | "Skip" / "Next" | Skip to next track |
 | "Previous" / "Go back" / "Last song" | Go to previous track |
-| "Volume [0–100]" | Set volume level |
-| "Volume up" / "Volume down" | Adjust volume by 15% |
+| "Volume [0–100]" | Set exact volume level |
+| "Volume up" / "Turn up the volume" / "Louder" | Increase volume by 15% |
+| "Volume down" / "Turn down the volume" / "Quieter" / "Softer" | Decrease volume by 15% |
+| "Full volume" / "All the way up" / "Maximum" | Set volume to 100% |
+| "Turn your volume to zero" / "All the way down" / "Silent" | Set volume to 0% |
 | "What's playing?" / "What song is this?" | Currently playing track + artist |
 | "Who is this?" / "Who sings this?" | Identify current artist |
+| "Nevermind" / "Cancel" / "Forget it" / "Nope" | Dismiss a false wake trigger |
 
 ### Claude commands (requires API key)
 
@@ -533,10 +548,10 @@ No soldering required — use female-to-female jumper wires.
 - Token may need refresh — delete `~/spotipy.cache` and re-run `python3 ~/spotify_auth.py`
 
 **Wake word not detected over music**
-- This is a hardware limitation of single-mic setups — the mic picks up the speaker output
-- A USB conference speakerphone with built-in echo cancellation (e.g., Jabra Speak) significantly improves this
+- A USB conference speakerphone with built-in echo cancellation (e.g., **Jabra SPEAK 510**) is the recommended solution — it handles AEC in hardware
 - Sage auto-pauses Spotify when it detects the wake word, but the word must be heard first
-- Keeping Spotify volume at 75% or lower helps the mic hear you
+- With a single-mic setup, keeping Spotify volume at 75% or lower helps the mic hear you
+- The OWW wake word threshold can be tuned in `sage.py` (`OWW_THRESHOLD`) — higher values (0.80–0.90) reduce false triggers from ambient noise like running water or background TV
 
 **Service won't start**
 - Check logs: `journalctl -u sage -f`

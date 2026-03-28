@@ -211,7 +211,7 @@ try:
             client_id=_sp_id,
             client_secret=_sp_secret,
             redirect_uri="http://127.0.0.1:8888/callback",
-            scope="user-modify-playback-state user-read-playback-state",
+            scope="user-modify-playback-state user-read-playback-state user-library-read",
             cache_path=os.path.expanduser("~/spotipy.cache"),
             open_browser=False
         ))
@@ -267,12 +267,21 @@ sys.stdout.flush()
 
 # ── Max volume at startup (using detected card numbers) ──────────────────────
 if _speaker_card:
-    subprocess.run(["amixer", "-c", _speaker_card, "cset", "numid=2", "on"],
-                   capture_output=True)
-    subprocess.run(["amixer", "-c", _speaker_card, "cset", "numid=3", "147,147"],
-                   capture_output=True)
+    # Try Jabra-style controls first (numid=3=switch, numid=4=volume, numid=6=mic)
+    # then fall back to old speaker controls (numid=2=switch, numid=3=volume)
+    r = subprocess.run(["amixer", "-c", _speaker_card, "cset", "numid=4", "11"],
+                       capture_output=True)
+    if r.returncode != 0:
+        subprocess.run(["amixer", "-c", _speaker_card, "cset", "numid=2", "on"],
+                       capture_output=True)
+        subprocess.run(["amixer", "-c", _speaker_card, "cset", "numid=3", "147,147"],
+                       capture_output=True)
+    else:
+        subprocess.run(["amixer", "-c", _speaker_card, "cset", "numid=3", "on"],
+                       capture_output=True)
 if _mic_card:
-    subprocess.run(["amixer", "-c", _mic_card, "cset", "numid=3", "16"],
+    # Jabra mic volume
+    subprocess.run(["amixer", "-c", _mic_card, "cset", "numid=6", "7"],
                    capture_output=True)
 
 # ── Faster Whisper (for command recognition) ─────────────────────────────────
@@ -319,7 +328,7 @@ def _play_raw(samples, sr=22050):
     ap.stdin.close()
     ap.wait()
 
-def _chime_note(freq, dur, sr=22050, amp=15000):
+def _chime_note(freq, dur, sr=22050, amp=18000):
     """Warm marimba-like note: gentle attack, smooth decay, clean tone."""
     n = int(sr * dur)
     samples = []
@@ -333,7 +342,7 @@ def _chime_note(freq, dur, sr=22050, amp=15000):
         samples.append(struct.pack("<h", max(-32767, min(32767, value))))
     return samples
 
-def _crystal_note(freq, dur, sr=22050, amp=14000):
+def _crystal_note(freq, dur, sr=22050, amp=17000):
     """Crystalline harp/wind-chime note: soft attack then gentle ring-out with subtle overtones."""
     n = int(sr * dur)
     samples = []
@@ -1375,19 +1384,28 @@ def handle_command(text):
                 return
 
             # Volume
-            if "volume" in text:
+            _vol_triggers = ("volume", "turn it up", "turn it down", "turn up", "turn down",
+                             "louder", "quieter", "softer", "full volume")
+            if any(t in text for t in _vol_triggers):
                 import re as _re
                 nums = _re.findall(r'\d+', text)
+                cur_vol = (sp.current_playback() or {}).get("device", {}).get("volume_percent", 50)
                 if nums:
                     vol = max(0, min(100, int(nums[0])))
                     sp.volume(vol)
                     speak(f"Volume set to {vol}")
-                elif "up" in text:
-                    sp.volume(min(100, (sp.current_playback() or {}).get("device", {}).get("volume_percent", 50) + 15))
-                    speak("Volume up")
-                elif "down" in text:
-                    sp.volume(max(0, (sp.current_playback() or {}).get("device", {}).get("volume_percent", 50) - 15))
-                    speak("Volume down")
+                elif any(w in text for w in ("all the way up", "full volume", "maximum", "max volume")):
+                    sp.volume(100)
+                    speak("Full volume")
+                elif any(w in text for w in ("to zero", "all the way down", "silent")):
+                    sp.volume(0)
+                    speak("Volume at zero")
+                elif any(w in text for w in ("up", "louder", "turn up", "turn it up", "raise")):
+                    sp.volume(min(100, cur_vol + 15))
+                    speak(random.choice(["Louder", "Volume up", "Turning it up"]))
+                elif any(w in text for w in ("down", "quieter", "softer", "turn down", "turn it down", "lower")):
+                    sp.volume(max(0, cur_vol - 15))
+                    speak(random.choice(["Quieter", "Volume down", "Turning it down"]))
                 return
 
             # What's playing
@@ -1409,11 +1427,33 @@ def handle_command(text):
                 query = query.replace(suffix, "")
             query = query.strip().strip(".")
 
-            if not query or query in ("music", "something", "some music", "songs"):
+            if not query or query in ("music", "something", "some music", "songs", "spotify", "my music", "my songs"):
                 dev = _ensure_device()
                 if dev:
-                    speak("Resuming music")
-                    sp.start_playback(device_id=dev)
+                    # Try resuming first
+                    try:
+                        current = sp.current_playback()
+                        if current and current.get("item"):
+                            sp.start_playback(device_id=dev)
+                            speak("Resuming music")
+                            return
+                    except Exception:
+                        pass
+                    # Nothing to resume — play liked songs on shuffle
+                    try:
+                        liked = sp.current_user_saved_tracks(limit=50)
+                        uris = [t["track"]["uri"] for t in liked["items"] if t.get("track")]
+                        if uris:
+                            import random as _rnd
+                            _rnd.shuffle(uris)
+                            sp.start_playback(device_id=dev, uris=uris)
+                            sp.shuffle(True, device_id=dev)
+                            speak("Playing your liked songs")
+                        else:
+                            speak("No liked songs found on this account")
+                    except Exception as e:
+                        print(f"Liked songs error: {e}", flush=True)
+                        speak("I had trouble loading your liked songs")
                 else:
                     speak("I can't find the speaker right now.")
                 return
@@ -1434,7 +1474,7 @@ def handle_command(text):
                 speak(f"Playing {track['name']} by {track['artists'][0]['name']}")
                 sp.start_playback(device_id=dev, uris=[track["uri"]])
                 try:
-                    sp.volume(75, device_id=dev)
+                    sp.volume(90, device_id=dev)
                 except Exception:
                     pass
                 return
@@ -1446,7 +1486,7 @@ def handle_command(text):
                 speak(f"Playing {artists[0]['name']}")
                 sp.start_playback(device_id=dev, context_uri=artists[0]["uri"])
                 try:
-                    sp.volume(75, device_id=dev)
+                    sp.volume(90, device_id=dev)
                 except Exception:
                     pass
                 return
@@ -1458,7 +1498,7 @@ def handle_command(text):
                 speak(f"Playing playlist {playlists[0]['name']}")
                 sp.start_playback(device_id=dev, context_uri=playlists[0]["uri"])
                 try:
-                    sp.volume(75, device_id=dev)
+                    sp.volume(90, device_id=dev)
                 except Exception:
                     pass
                 return
@@ -1722,7 +1762,7 @@ def handle_command(text):
     speak(random.choice(["Sorry, I missed that. Could you try that again?", "I didn't catch that. Could you try again?", "Sorry, I missed that one. Try again?"]))
 
 # ── Audio setup ──────────────────────────────────────────────────────────────
-MIC_RATE = 44100      # what the USB mic hardware supports
+MIC_RATE = 16000      # Jabra SPEAK 510 native rate
 VOSK_RATE = 16000    # what the Vosk model expects
 
 model = Model("/home/sage/vosk-model-small-en-us-0.15")
@@ -1756,7 +1796,7 @@ except Exception as e:
 # Load hey_sage wake word model
 oww_session = None
 oww_input_name = None
-OWW_THRESHOLD = 0.55  # lowered to catch wake word from ~12 feet away
+OWW_THRESHOLD = 0.85  # lowered to catch wake word from ~12 feet away
 try:
     import onnxruntime as _ort
     oww_session = _ort.InferenceSession("/home/sage/hey_sage.onnx")
@@ -1790,7 +1830,8 @@ os.close(_old_stderr)
 MIC_DEVICE_INDEX = None
 for i in range(p.get_device_count()):
     info = p.get_device_info_by_index(i)
-    if "USB PnP" in info.get("name", "") and info.get("maxInputChannels", 0) > 0:
+    name = info.get("name", "")
+    if ("USB PnP" in name or "Jabra" in name or "USB Audio" in name) and info.get("maxInputChannels", 0) > 0:
         MIC_DEVICE_INDEX = i
         break
 if MIC_DEVICE_INDEX is None:
@@ -2032,14 +2073,23 @@ while True:
                 "This is Sage, I'm listening.",
             ])
             command = whisper_listen(spoken_prompt=greeting)
-            if command:
+            _dismiss_words = ("never mind", "nevermind", "cancel", "nothing",
+                              "forget it", "false alarm", "sorry", "no", "nope",
+                              "go away", "stop listening", "dismiss")
+            if command and any(d in command.lower() for d in _dismiss_words):
+                print(f"Dismissed: {command}", flush=True)
+                speak(random.choice(["No worries.", "Alright.", "Standing by."]))
+            elif command:
                 handle_command(command)
                 lights.set_state("success")
             else:
                 # One gentle retry
                 speak(random.choice(["I'm still here.", "Go ahead.", "Try again."]))
                 command = whisper_listen()
-                if command:
+                if command and any(d in command.lower() for d in _dismiss_words):
+                    print(f"Dismissed on retry: {command}", flush=True)
+                    speak(random.choice(["No worries.", "Alright.", "Standing by."]))
+                elif command:
                     handle_command(command)
             # Resume Spotify if it was paused for listening
             try:
