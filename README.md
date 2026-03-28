@@ -1,4 +1,4 @@
-# Sage v1.3 🌿
+# Sage v1.4 🌿
 ### A privacy-first voice assistant for your kitchen, built on a Raspberry Pi.
 
 Sage is an open-source voice assistant that does the everyday things a kitchen assistant should do — set timers, give weather reports, manage reminders, chat with Claude AI — without sending your voice to the cloud. The voice pipeline runs entirely on a Raspberry Pi.
@@ -72,13 +72,18 @@ Sage is that alternative. The voice pipeline runs locally. Audio is never stored
 - ⏰ Auto bedtime: 10 PM weekdays, 11:30 PM weekends
 - ⏰ Auto wake: 6:30 AM weekdays, 8:30 AM weekends with full briefing
 
-### Music
-- 🎵 **Spotify playback** — "Play Fleetwood Mac" (requires Spotify API + Raspotify setup)
+### Music (Spotify)
+- 🎵 **Spotify playback** — "Play Fleetwood Mac", "Put on some jazz", "Listen to Taylor Swift"
+- 🎵 **Natural phrasing** — understands "play", "put on", "throw on", "listen to", "queue up", "shuffle", "can you play", and more
 - 🎵 **Song, artist, or playlist search** — searches tracks first, then artists, then playlists
-- 🎵 Pause, resume, skip, previous by voice
+- 🎵 **Pause/stop** — "Pause", "Stop the music", "Stop", "Mute"
+- 🎵 **Resume** — "Resume", "Resume music", "Unpause"
+- 🎵 **Skip/previous** — "Skip", "Next", "Previous", "Go back", "Last song"
 - 🎵 **Volume control** — "Volume 50", "Volume up", "Volume down"
-- 🎵 **Now playing** — "What's playing?" / "What song is this?"
-- 🎵 **Plays through the Pi** — Raspotify turns the Pi into a Spotify Connect speaker, no phone needed
+- 🎵 **Now playing** — "What's playing?", "What song is this?", "Who is this?", "Who sings this?"
+- 🎵 **Auto-pause on wake** — Sage pauses Spotify when it hears "Hey Sage" so it can hear your command, then resumes if the command wasn't music-related
+- 🎵 **Plays through the Pi** — Raspotify turns the Pi into a Spotify Connect speaker
+- 🎵 **Hardcoded device fallback** — if the Spotify API can't find the speaker, Sage falls back to a known device ID and restarts Raspotify automatically
 
 ### Personality
 - 🎭 Varied responses — Sage doesn't repeat the same phrase
@@ -159,24 +164,139 @@ wget -O ~/piper-voices/en_US-lessac-medium.onnx.json \
 curl -sL https://dtcooper.github.io/raspotify/install.sh | sh
 ```
 
-Then configure it to use your USB speaker:
+#### Auto-detect speaker script
+
+Create `/usr/local/bin/setup-raspotify.sh` to auto-detect your USB speaker on every boot:
 
 ```bash
-sudo nano /etc/raspotify/conf
-```
-
-Set these values:
-```
+sudo tee /usr/local/bin/setup-raspotify.sh << 'EOF'
+#!/bin/bash
+CARD=$(aplay -l 2>/dev/null | grep -i 'USB Audio\|UACDemo' | head -1 | sed 's/card \([0-9]*\).*/\1/')
+if [ -z "$CARD" ]; then
+    CARD=4
+fi
+cat > /etc/raspotify/conf << CONF
 LIBRESPOT_NAME="Sage"
-LIBRESPOT_DEVICE="plughw:4,0"   # match your speaker card number from aplay -l
+LIBRESPOT_DEVICE="plughw:${CARD},0"
+CONF
+EOF
+sudo chmod +x /usr/local/bin/setup-raspotify.sh
 ```
 
-Restart:
+Create a systemd service to run this before Raspotify starts:
+
+```bash
+sudo tee /etc/systemd/system/setup-raspotify.service << EOF
+[Unit]
+Description=Auto-detect USB speaker for Raspotify
+Before=raspotify.service
+Wants=sound.target
+After=sound.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/setup-raspotify.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable setup-raspotify.service
+```
+
+#### Open firewall for Spotify Connect
+
+Raspotify uses mDNS (Avahi) for device discovery and needs LAN access for Spotify Connect:
+
+```bash
+sudo ufw allow 5353/udp comment 'mDNS/Avahi'
+sudo ufw allow proto tcp from 192.168.0.0/24 to any port 1:65535 comment 'Spotify Connect LAN'
+sudo ufw reload
+```
+
+#### Disable PulseAudio (important)
+
+PulseAudio grabs the audio device and blocks direct ALSA access. Sage and Raspotify both need direct access to `plughw`:
+
+```bash
+systemctl --user stop pulseaudio.socket pulseaudio.service
+systemctl --user disable pulseaudio.socket pulseaudio.service
+systemctl --user mask pulseaudio.socket pulseaudio.service
+mkdir -p ~/.config/pulse
+echo 'autospawn = no' > ~/.config/pulse/client.conf
+```
+
+#### Verify
+
 ```bash
 sudo systemctl restart raspotify
+journalctl -u raspotify -n 10   # should see "Published zeroconf service"
 ```
 
-This makes the Pi a Spotify Connect speaker called "Sage" — Sage voice commands will play music directly through the Pi's speaker with no phone or computer required.
+Raspotify makes the Pi a Spotify Connect speaker called "Sage". The auto-detect script ensures the correct speaker card is used even if USB device order changes across reboots.
+
+### How Spotify works on Sage
+
+Spotify on Sage involves three separate components that must all be on the **same Spotify account**:
+
+1. **Raspotify (librespot)** — a Spotify Connect client that runs as a system service. It registers the Pi as a speaker called "Sage" on your local network, receives audio streams from Spotify, and plays them through the USB speaker.
+
+2. **Spotipy (Python API client)** — runs inside `sage.py`. It handles voice commands: searching for songs, starting/pausing playback, controlling volume, and checking what's playing. It communicates with Spotify's Web API.
+
+3. **Spotify Connect discovery** — uses mDNS/Avahi (port 5353) so the Pi appears as a speaker in Spotify's device list on your phone, computer, or the web player.
+
+#### Dedicated Spotify account recommended
+
+**We strongly recommend using a separate, dedicated Spotify account for Sage** rather than your personal account. Here's why:
+
+- Raspotify and Spotipy must be logged into the **same account** for voice commands to work. If they're on different accounts, `sp.devices()` can't see the Raspotify speaker.
+- If Sage uses your personal account, playing music on your phone will conflict with the Pi — Spotify only allows one active stream per account (unless you have a Family/Duo plan).
+- A dedicated account keeps your personal listening history, recommendations, and playlists separate from Sage's activity.
+- A Spotify Free account works, though playback may include ads. A second Premium account on a Family plan is ideal.
+
+#### How voice commands flow
+
+```
+"Hey Sage, play Fleetwood Mac"
+        |
+   Wake word detected → Spotify paused (if playing) → Chime
+        |
+   Whisper transcribes: "play fleetwood mac"
+        |
+   Phrase matched → query extracted: "fleetwood mac"
+        |
+   Spotipy searches Spotify API (track → artist → playlist)
+        |
+   Sage speaks: "Playing Fleetwood Mac"
+        |
+   Spotipy calls start_playback(device_id=SAGE_DEVICE_ID)
+        |
+   Raspotify receives the stream → plays through USB speaker
+```
+
+#### Device discovery and the idle problem
+
+Raspotify only appears in the Spotify device list when it has recently been active. After being idle for a while, it becomes invisible to `sp.devices()`. Sage handles this with:
+
+1. **Hardcoded device ID fallback** — if the API can't find the device, Sage uses a known device ID stored in the code
+2. **Auto-restart** — if the hardcoded ID also fails, Sage restarts the Raspotify service and retries
+3. **`transfer_playback()`** — attempts to wake the device by transferring playback to it directly
+
+To get the device ID for your setup, play something on Sage from the Spotify app, then run:
+
+```python
+python3 -c "
+import spotipy
+from spotipy.oauth2 import SpotifyOAuth
+sp = spotipy.Spotify(auth_manager=SpotifyOAuth(...))
+for d in sp.devices()['devices']:
+    print(f\"{d['name']}: {d['id']}\")
+"
+```
+
+Copy the Sage device ID into the `_SAGE_DEVICE_ID` variable in `sage.py`.
 
 ### 8a. Find your audio devices
 
@@ -337,13 +457,18 @@ All speech processing happens on-device. Outbound network traffic is limited to:
 | "Who made you?" | Credits |
 | "Thank you" | You're welcome! |
 | "Play [song/artist/playlist]" | Play music on Spotify |
-| "Pause" / "Stop music" | Pause playback |
-| "Resume" | Resume playback |
+| "Put on [artist]" / "Throw on [song]" | Natural play phrases |
+| "Listen to [artist]" / "Queue up [song]" | More natural play phrases |
+| "Play [song] on Spotify" | Explicit Spotify request |
+| "Play music" / "Play something" | Resume or start radio |
+| "Pause" / "Stop the music" / "Mute" | Pause playback |
+| "Resume" / "Unpause" | Resume playback |
 | "Skip" / "Next" | Skip to next track |
-| "Previous" | Go to previous track |
+| "Previous" / "Go back" / "Last song" | Go to previous track |
 | "Volume [0–100]" | Set volume level |
 | "Volume up" / "Volume down" | Adjust volume by 15% |
-| "What's playing?" | Currently playing track + artist |
+| "What's playing?" / "What song is this?" | Currently playing track + artist |
+| "Who is this?" / "Who sings this?" | Identify current artist |
 
 ### Claude commands (requires API key)
 
@@ -390,6 +515,28 @@ No soldering required — use female-to-female jumper wires.
 **Speaker not working**
 - `sage.py` sets volume to max on startup — verify card numbers match your hardware
 - Check with `aplay -l` and update `SPEAKER_DEVICE` in sage.py
+- Make sure PulseAudio is disabled — it grabs the audio device and blocks direct ALSA access
+- Check `sudo fuser -v /dev/snd/*` to see what's holding the audio devices
+
+**Spotify not playing / "Can't find the speaker"**
+- Raspotify and Spotipy must be on the **same Spotify account**
+- Check that Raspotify is running: `systemctl status raspotify`
+- Check Raspotify logs for crashes: `journalctl -u raspotify -n 20`
+- If you see `Unsupported Sample Rate 44100` — your speaker doesn't support 44100 Hz. Use `plughw:X,0` (not `hw:X,0`) in the Raspotify config so ALSA handles rate conversion
+- The Spotify device goes idle/invisible after inactivity — play something from the Spotify app to wake it up, then voice commands will work
+- Verify firewall allows mDNS: `sudo ufw status` should show port 5353/udp open
+- Check `avahi-daemon` is running: `systemctl status avahi-daemon`
+
+**Spotify says "Connection aborted" or "RemoteDisconnected"**
+- This is usually a transient network issue — Sage will auto-retry once
+- Check the Pi's internet connection: `ping -c 3 spotify.com`
+- Token may need refresh — delete `~/spotipy.cache` and re-run `python3 ~/spotify_auth.py`
+
+**Wake word not detected over music**
+- This is a hardware limitation of single-mic setups — the mic picks up the speaker output
+- A USB conference speakerphone with built-in echo cancellation (e.g., Jabra Speak) significantly improves this
+- Sage auto-pauses Spotify when it detects the wake word, but the word must be heard first
+- Keeping Spotify volume at 75% or lower helps the mic hear you
 
 **Service won't start**
 - Check logs: `journalctl -u sage -f`

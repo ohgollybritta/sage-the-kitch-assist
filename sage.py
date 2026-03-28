@@ -401,6 +401,17 @@ def whisper_listen(max_seconds=15, spoken_prompt=None):
     sample_rate = 16000
     chunk_size = 1600  # 0.1 seconds
 
+    # Pause Spotify so mic can hear the user
+    whisper_listen._spotify_was_playing = False
+    try:
+        if sp:
+            _pb = sp.current_playback()
+            if _pb and _pb.get("is_playing"):
+                whisper_listen._spotify_was_playing = True
+                sp.pause_playback()
+    except Exception:
+        pass
+
     time.sleep(0.2)
     if spoken_prompt:
         speak(spoken_prompt)
@@ -1274,36 +1285,80 @@ def handle_command(text):
             speak("Sorry, I couldn't get the weather right now.")
         return
     # Spotify — play, pause, skip, resume, volume, what's playing
-    if sp and ("play" in text or "pause" in text or "resume" in text or "skip" in text
-               or "next" in text or "previous" in text or "volume" in text
-               or "what's playing" in text or "what is playing" in text
-               or "what song" in text or "stop the music" in text or "stop music" in text):
+    _spotify_play_phrases = ("play ", "put on ", "throw on ", "listen to ",
+                             "queue up ", "shuffle ", "turn on ", "i want to hear ",
+                             "can you play ", "could you play ", "start playing ")
+    _spotify_ctrl_words = {"pause", "resume", "skip", "next", "previous",
+                           "volume", "stop the music", "stop music", "mute",
+                           "what's playing", "what is playing", "what song",
+                           "currently playing", "who is this", "who sings this"}
 
-        def _get_device():
-            devices = sp.devices()["devices"]
-            if not devices:
-                return None
-            # Prefer the local raspotify device ("Sage")
-            for d in devices:
-                if "sage" in d.get("name", "").lower():
-                    return d["id"]
-            return devices[0]["id"]
+    _is_spotify_play = sp and any(text.startswith(p) or f" {p}" in f" {text}" for p in _spotify_play_phrases)
+    _is_spotify_ctrl = sp and any(w in text for w in _spotify_ctrl_words)
+    _is_spotify_music = sp and ("music" in text or "spotify" in text) and ("play" in text or "put" in text or "turn" in text or "start" in text or "open" in text)
+
+    if _is_spotify_play or _is_spotify_ctrl or _is_spotify_music:
+
+        _SAGE_DEVICE_ID = "c3bd776c4465937f9c7abf94dfba78d9fa39b9d3"
+
+        def _get_device(retries=3):
+            """Get Sage raspotify device, with hardcoded fallback."""
+            import time as _time
+            for attempt in range(retries):
+                try:
+                    devices = sp.devices()["devices"]
+                    for d in devices:
+                        if "sage" in d.get("name", "").lower():
+                            return d["id"]
+                    if devices:
+                        return devices[0]["id"]
+                except Exception as e:
+                    print(f"Device list attempt {attempt+1} failed: {e}", flush=True)
+                if attempt < retries - 1:
+                    _time.sleep(2)
+            return None
+
+        def _ensure_device():
+            """Get device, fall back to hardcoded Sage ID, restart raspotify as last resort."""
+            dev = _get_device(retries=1)
+            if dev:
+                return dev
+            # Try hardcoded device ID directly
+            print("No device in list, trying hardcoded Sage ID...", flush=True)
+            try:
+                sp.transfer_playback(_SAGE_DEVICE_ID, force_play=False)
+                import time as _time
+                _time.sleep(2)
+                return _SAGE_DEVICE_ID
+            except Exception as e:
+                print(f"Transfer to hardcoded ID failed: {e}", flush=True)
+            # Last resort: restart raspotify
+            print("Restarting raspotify...", flush=True)
+            import subprocess
+            subprocess.run(["sudo", "systemctl", "restart", "raspotify"], timeout=10)
+            import time as _time
+            _time.sleep(5)
+            dev = _get_device(retries=3)
+            if dev:
+                return dev
+            # Final fallback: just return the hardcoded ID
+            return _SAGE_DEVICE_ID
 
         try:
             # Pause / stop music
-            if "pause" in text or "stop the music" in text or "stop music" in text:
+            if "pause" in text or "stop the music" in text or "stop music" in text or "mute" in text:
                 sp.pause_playback()
                 speak("Paused")
                 return
 
             # Resume
-            if "resume" in text:
-                dev = _get_device()
+            if text.strip() in ("resume", "resume music", "resume playback", "unpause"):
+                dev = _ensure_device()
                 if dev:
                     sp.start_playback(device_id=dev)
                     speak("Resuming")
                 else:
-                    speak("No active Spotify device found.")
+                    speak("I can't find the Sage speaker right now.")
                 return
 
             # Skip / next
@@ -1313,7 +1368,7 @@ def handle_command(text):
                 return
 
             # Previous
-            if "previous" in text or "go back" in text:
+            if "previous" in text or "go back" in text or "last song" in text:
                 sp.previous_track()
                 speak("Going back")
                 return
@@ -1335,7 +1390,7 @@ def handle_command(text):
                 return
 
             # What's playing
-            if "what" in text and ("playing" in text or "song" in text):
+            if ("what" in text and ("playing" in text or "song" in text)) or "who is this" in text or "who sings" in text or "currently playing" in text:
                 current = sp.current_playback()
                 if current and current.get("item"):
                     track = current["item"]["name"]
@@ -1345,55 +1400,88 @@ def handle_command(text):
                     speak("Nothing is playing right now.")
                 return
 
-            # Play — search for query (try track first, then artist, then playlist)
-            if "play" in text:
-                query = text.replace("play", "").strip()
-                if not query:
-                    # No query — just resume
-                    dev = _get_device()
-                    if dev:
-                        sp.start_playback(device_id=dev)
-                        speak("Resuming")
-                    return
+            # Play — extract query by stripping trigger phrases
+            query = text
+            for p in sorted(_spotify_play_phrases, key=len, reverse=True):
+                query = query.replace(p, " ")
+            for suffix in ("on spotify", "on the speaker", "on sage", "for me", "please"):
+                query = query.replace(suffix, "")
+            query = query.strip().strip(".")
 
-                dev = _get_device()
-                if not dev:
-                    speak("No active Spotify device found. Open Spotify on your phone or computer first.")
-                    return
+            if not query or query in ("music", "something", "some music", "songs"):
+                dev = _ensure_device()
+                if dev:
+                    speak("Resuming music")
+                    sp.start_playback(device_id=dev)
+                else:
+                    speak("I can't find the speaker right now.")
+                return
 
-                # Try track search first
-                results = sp.search(q=query, type="track", limit=1)
-                tracks = results.get("tracks", {}).get("items", [])
-                if tracks:
-                    track = tracks[0]
-                    sp.start_playback(device_id=dev, uris=[track["uri"]])
-                    speak(f"Playing {track['name']} by {track['artists'][0]['name']}")
-                    return
+            dev = _ensure_device()
+            if not dev:
+                speak("I can't find the Sage speaker. Give me a moment and try again.")
+                return
 
-                # Try artist
-                results = sp.search(q=query, type="artist", limit=1)
-                artists = results.get("artists", {}).get("items", [])
-                if artists:
-                    sp.start_playback(device_id=dev, context_uri=artists[0]["uri"])
-                    speak(f"Playing {artists[0]['name']}")
-                    return
+            print(f"Spotify search: '{query}'", flush=True)
+            speak("Searching")
 
-                # Try playlist
-                results = sp.search(q=query, type="playlist", limit=1)
-                playlists = results.get("playlists", {}).get("items", [])
-                if playlists:
-                    sp.start_playback(device_id=dev, context_uri=playlists[0]["uri"])
-                    speak(f"Playing playlist {playlists[0]['name']}")
-                    return
+            # Try track first
+            results = sp.search(q=query, type="track", limit=1)
+            tracks = results.get("tracks", {}).get("items", [])
+            if tracks:
+                track = tracks[0]
+                speak(f"Playing {track['name']} by {track['artists'][0]['name']}")
+                sp.start_playback(device_id=dev, uris=[track["uri"]])
+                try:
+                    sp.volume(75, device_id=dev)
+                except Exception:
+                    pass
+                return
 
-                speak(f"Could not find {query} on Spotify")
+            # Try artist
+            results = sp.search(q=query, type="artist", limit=1)
+            artists = results.get("artists", {}).get("items", [])
+            if artists:
+                speak(f"Playing {artists[0]['name']}")
+                sp.start_playback(device_id=dev, context_uri=artists[0]["uri"])
+                try:
+                    sp.volume(75, device_id=dev)
+                except Exception:
+                    pass
+                return
+
+            # Try playlist
+            results = sp.search(q=query, type="playlist", limit=1)
+            playlists = results.get("playlists", {}).get("items", [])
+            if playlists:
+                speak(f"Playing playlist {playlists[0]['name']}")
+                sp.start_playback(device_id=dev, context_uri=playlists[0]["uri"])
+                try:
+                    sp.volume(75, device_id=dev)
+                except Exception:
+                    pass
+                return
+
+            speak(f"I couldn't find {query} on Spotify")
 
         except Exception as e:
             print(f"Spotify error: {e}", flush=True)
-            if "No active device" in str(e) or "404" in str(e):
-                speak("No active Spotify device found. Open Spotify on your phone or computer first.")
+            if "Connection aborted" in str(e) or "RemoteDisconnected" in str(e):
+                import time as _time
+                _time.sleep(2)
+                try:
+                    dev = _ensure_device()
+                    if dev:
+                        sp.start_playback(device_id=dev)
+                        speak("Had a hiccup, but music should be playing now.")
+                        return
+                except Exception:
+                    pass
+                speak("Spotify connection dropped. Try again in a moment.")
+            elif "No active device" in str(e) or "404" in str(e):
+                speak("I can't find the speaker right now. Try again in a moment.")
             else:
-                speak("Spotify ran into an issue. Please try again.")
+                speak("Spotify ran into an issue. Try again.")
                 send_notification(f"Spotify error: {e}", title="Spotify")
         return
 
@@ -1881,6 +1969,15 @@ while True:
                     # Hand off to Sage
                     lights.set_state("wake")
                     handle_command(command)
+                    # Resume Spotify if it was paused for listening
+                    try:
+                        if getattr(whisper_listen, "_spotify_was_playing", False):
+                            whisper_listen._spotify_was_playing = False
+                            _pb = sp.current_playback() if sp else None
+                            if _pb and not _pb.get("is_playing"):
+                                sp.start_playback()
+                    except Exception:
+                        pass
                     lights.set_state("idle")
                     break
 
@@ -1935,6 +2032,15 @@ while True:
                 command = whisper_listen()
                 if command:
                     handle_command(command)
+            # Resume Spotify if it was paused for listening
+            try:
+                if getattr(whisper_listen, "_spotify_was_playing", False):
+                    whisper_listen._spotify_was_playing = False
+                    _pb = sp.current_playback() if sp else None
+                    if _pb and not _pb.get("is_playing"):
+                        sp.start_playback()
+            except Exception:
+                pass
             lights.set_state("idle")
             # Reopen the mic stream for Vosk wake word detection
             stream = p.open(
