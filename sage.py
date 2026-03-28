@@ -414,6 +414,7 @@ def whisper_listen(max_seconds=15, spoken_prompt=None):
 
     time.sleep(0.2)
     if spoken_prompt:
+        play_chime()
         speak(spoken_prompt)
     else:
         play_chime()
@@ -1755,7 +1756,7 @@ except Exception as e:
 # Load hey_sage wake word model
 oww_session = None
 oww_input_name = None
-OWW_THRESHOLD = 0.45  # lowered to catch wake word from ~12 feet away
+OWW_THRESHOLD = 0.55  # lowered to catch wake word from ~12 feet away
 try:
     import onnxruntime as _ort
     oww_session = _ort.InferenceSession("/home/sage/hey_sage.onnx")
@@ -1923,6 +1924,14 @@ while True:
             last_activity = time.time()
             CLAUDE_IDLE_TIMEOUT = 8  # seconds of silence → auto-exit
             play_claude_chime()  # "I'm listening" chime
+            claude_greeting = random.choice([
+                "Claude here, what's your question?",
+                "It's Claude, what can I help with?",
+                "Claude here, go ahead.",
+                "This is Claude, I'm listening.",
+                "Claude here, what's on your mind?",
+            ])
+            speak_claude(claude_greeting)
             while in_conversation:
                 command = whisper_listen(max_seconds=10)
                 if not command or command.strip() == "" or "[blank" in command.lower():
@@ -2016,11 +2025,11 @@ while True:
             stream.stop_stream()
             stream.close()
             greeting = random.choice([
-                "How can I assist?",
-                "What can I do for you?",
-                "Go ahead.",
-                "I'm listening.",
-                "Yes?",
+                "Sage here, how can I assist?",
+                "Sage here, what can I do for you?",
+                "It's Sage, go ahead.",
+                "Sage here, what's up?",
+                "This is Sage, I'm listening.",
             ])
             command = whisper_listen(spoken_prompt=greeting)
             if command:
