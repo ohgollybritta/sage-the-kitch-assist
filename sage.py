@@ -78,7 +78,10 @@ def ask_claude(question):
     except Exception as e:
         print(f"Claude API error: {e}", flush=True)
         send_notification(f"Claude API error: {e}", title="Claude Error", force=True)
-        return "Sorry, I couldn't reach Claude right now. Check the API connection."
+        # Signal auth failure so the conversation loop can exit immediately
+        if "401" in str(e) or "authentication" in str(e).lower():
+            return "__AUTH_FAILED__"
+        return "Sorry, I couldn't reach Claude right now."
 
 # ── Personal config (presets, reminders) ─────────────────────────────────────
 SAGE_CONFIG = {"preset_timers": {}, "scheduled_reminders": []}
@@ -265,6 +268,17 @@ else:
     print("WARNING: USB mic not found, using default plughw:3,0")
 sys.stdout.flush()
 
+# ── PulseAudio routing (preferred over raw ALSA when available) ───────────────
+import os as _os
+_pulse_socket = f"/run/user/{_os.getuid()}/pulse/native"
+if _os.path.exists(_pulse_socket):
+    SPEAKER_DEVICE = "pulse"
+    MIC_HW_DEVICE = "pulse"
+    _os.environ.setdefault("PULSE_SERVER", f"unix:{_pulse_socket}")
+    print(f"PulseAudio active — routing audio through pulse (AEC enabled)", flush=True)
+else:
+    print("PulseAudio not available — using ALSA direct", flush=True)
+
 # ── Max volume at startup (using detected card numbers) ──────────────────────
 if _speaker_card:
     # Try Jabra-style controls first (numid=3=switch, numid=4=volume, numid=6=mic)
@@ -363,13 +377,38 @@ def _gap(ms, sr=22050):
 # ── Sage chimes: warm descending arpeggio (marimba-like) ─────────────────────
 
 def play_chime():
-    """Sage wake chime — G5 → E5 → C5 descending major arpeggio."""
+    """Sage wake chime — C5 → E5 → G5 ascending major arpeggio."""
     s = []
-    s += _chime_note(784, 0.22)   # G5
+    s += _chime_note(523, 0.22)   # C5 — start low
     s += _gap(20)
     s += _chime_note(659, 0.22)   # E5
     s += _gap(20)
-    s += _chime_note(523, 0.28)   # C5  (let the bottom note breathe)
+    s += _chime_note(784, 0.28)   # G5 — land high (open, attentive)
+    _play_raw(s)
+
+def _buzz_note(freq, dur, sr=22050, amp=22000):
+    """Harsh buzzy note — square-wave-like odd harmonics, for error feedback."""
+    n = int(sr * dur)
+    samples = []
+    for i in range(n):
+        t = i / n
+        envelope = math.exp(-2.5 * t)
+        tone = (math.sin(2 * math.pi * freq * i / sr)
+              + math.sin(2 * math.pi * freq * 3 * i / sr) * 0.33
+              + math.sin(2 * math.pi * freq * 5 * i / sr) * 0.20
+              + math.sin(2 * math.pi * freq * 7 * i / sr) * 0.14)
+        value = int(amp * envelope * tone)
+        samples.append(struct.pack("<h", max(-32767, min(32767, value))))
+    return samples
+
+def play_error_chime():
+    """Didn't-catch-that chime — low dissonant descending buzz, clearly wrong."""
+    s = []
+    s += _buzz_note(415, 0.20)   # Ab4
+    s += _gap(10)
+    s += _buzz_note(294, 0.20)   # D4 — tritone drop
+    s += _gap(10)
+    s += _buzz_note(196, 0.28)   # G3 — drop low and die out
     _play_raw(s)
 
 def play_confirm_chime():
@@ -395,15 +434,23 @@ def play_claude_chime():
     _play_raw(s)
 
 def play_thinking_chime():
-    """Claude thinking chime — E5 → A5, softer two-note shimmer."""
+    """Claude thinking chime — meandering 6-note wander, no clear direction."""
     s = []
-    s += _crystal_note(659, 0.20)   # E5
-    s += _gap(18)
-    s += _crystal_note(880, 0.26)   # A5
+    s += _crystal_note(659, 0.16)   # E5 — start middle
+    s += _gap(12)
+    s += _crystal_note(784, 0.14)   # G5 — step up
+    s += _gap(12)
+    s += _crystal_note(880, 0.14)   # A5 — drift higher
+    s += _gap(12)
+    s += _crystal_note(698, 0.14)   # F5 — drop back
+    s += _gap(12)
+    s += _crystal_note(740, 0.14)   # F#5 — slight rise
+    s += _gap(12)
+    s += _crystal_note(659, 0.22)   # E5 — settle back where we started
     _play_raw(s)
 
 # ── Whisper command listener ─────────────────────────────────────────────────
-def whisper_listen(max_seconds=15, spoken_prompt=None):
+def whisper_listen(max_seconds=6.5, spoken_prompt=None):
     """Play chime, record with silence detection, then transcribe with Faster Whisper."""
     import wave
     wav_path = "/tmp/sage_cmd.wav"
@@ -502,7 +549,8 @@ def whisper_listen(max_seconds=15, spoken_prompt=None):
     _transcription = [None]
     def _do_transcribe():
         t0 = _t.time()
-        segs, _ = whisper_model.transcribe(wav_path, beam_size=1, language="en")
+        segs, _ = whisper_model.transcribe(wav_path, beam_size=1, language="en",
+            initial_prompt="Hey Sage, get Claude, ask Claude, talk to Claude, set a timer, what's the weather, remind me, what time is it")
         _transcription[0] = (" ".join([s.text.strip() for s in segs]).strip(), _t.time() - t0)
     _tx_thread = threading.Thread(target=_do_transcribe, daemon=True)
     _tx_thread.start()
@@ -520,21 +568,21 @@ def whisper_listen(max_seconds=15, spoken_prompt=None):
 
 # ── Alarm tone ───────────────────────────────────────────────────────────────
 def build_alarm_pattern():
-    """Build one cycle of the alarm chime pattern (C5→E5→G5 with pauses)."""
+    """Build one cycle of the alarm pattern — three sharp A5 beeps."""
     sr = 22050
     samples = []
-    notes = [(523, 0.25), (659, 0.25), (784, 0.35)]
+    notes = [(880, 0.18), (880, 0.18), (880, 0.25)]   # A5 × 3, urgent
     for freq, dur in notes:
         n_samples = int(sr * dur)
         for n in range(n_samples):
             t = n / n_samples
-            envelope = math.exp(-3.0 * t) * math.sin(math.pi * min(t * 8, 1.0))
-            value = int(20000 * envelope * math.sin(2 * math.pi * freq * n / sr))
+            envelope = math.exp(-5.0 * t)              # sharp attack, fast decay
+            value = int(32000 * envelope * math.sin(2 * math.pi * freq * n / sr))
             samples.append(struct.pack("<h", max(-32767, min(32767, value))))
-        for n in range(int(sr * 0.08)):
+        for n in range(int(sr * 0.06)):                # short gap between beeps
             samples.append(struct.pack("<h", 0))
     # Pause between repeats
-    for n in range(int(sr * 0.6)):
+    for n in range(int(sr * 0.45)):
         samples.append(struct.pack("<h", 0))
     return b"".join(samples)
 
@@ -554,6 +602,7 @@ def whisper_check_stop():
         capture_output=True
     )
     if rec.returncode != 0:
+        print(f"whisper_check_stop arecord failed: {rec.stderr.decode(errors='replace').strip()}", flush=True)
         return False
     try:
         segments, _ = whisper_model.transcribe(wav_path, beam_size=1, language="en")
@@ -593,7 +642,8 @@ def play_alarm_loop(stop_event):
             if not stop_event.is_set():
                 mic_release.clear()
                 break
-            # Listen for dismissal word
+            # Listen for dismissal word — brief cue so user knows window is open
+            speak("Say stop to silence.")
             if whisper_check_stop():
                 stop_event.clear()
                 mic_release.clear()
@@ -629,10 +679,13 @@ def run_timer(timer):
     with timers_lock:
         if timer in active_timers:
             active_timers.remove(timer)
-    speak(random.choice(["Timer stopped.", "Got it, silenced.", "Done, timer off."]))
+    play_confirm_chime()  # descending chime = timer dismissed
     lights.set_state("idle")
 
 def start_timer(label, seconds):
+    # Subtract processing overhead so timer fires at the right wall-clock time
+    elapsed = time.time() - getattr(start_timer, "_cmd_time", time.time())
+    seconds = max(1, seconds - int(elapsed))
     timer = {
         "label": label,
         "seconds": seconds,
@@ -1023,7 +1076,7 @@ def handle_command(text):
                   "yeah", "yep", "yes", "done", "shut", "quiet", "top", "stuff", "stock", "hop"]
     if any(w in text for w in stop_words):
         if dismiss_alarms():
-            speak(random.choice(["Timer stopped.", "Got it, silenced.", "Done, timer off."]))
+            play_confirm_chime()  # descending chime = dismissed
             lights.set_state("idle")
             return
         # If no alarms ringing, maybe they want to cancel a pending timer
@@ -1466,7 +1519,7 @@ def handle_command(text):
             print(f"Spotify search: '{query}'", flush=True)
             speak("Searching")
 
-            # Try track first
+            # Try track first (full query)
             results = sp.search(q=query, type="track", limit=1)
             tracks = results.get("tracks", {}).get("items", [])
             if tracks:
@@ -1478,6 +1531,23 @@ def handle_command(text):
                 except Exception:
                     pass
                 return
+
+            # Try splitting query into artist + track (e.g. "tundra your name")
+            words = query.strip().split()
+            for split in range(1, len(words)):
+                artist_guess = " ".join(words[:split])
+                track_guess = " ".join(words[split:])
+                split_results = sp.search(q=f"artist:{artist_guess} track:{track_guess}", type="track", limit=1)
+                split_tracks = split_results.get("tracks", {}).get("items", [])
+                if split_tracks:
+                    track = split_tracks[0]
+                    speak(f"Playing {track['name']} by {track['artists'][0]['name']}")
+                    sp.start_playback(device_id=dev, uris=[track["uri"]])
+                    try:
+                        sp.volume(90, device_id=dev)
+                    except Exception:
+                        pass
+                    return
 
             # Try artist
             results = sp.search(q=query, type="artist", limit=1)
@@ -1636,7 +1706,7 @@ def handle_command(text):
             # CPU temperature
             temp_result = subprocess.run(["vcgencmd", "measure_temp"],
                                          capture_output=True, text=True, timeout=5)
-            temp = temp_result.stdout.strip().replace("temp=", "").replace("'C", " degrees")
+            temp = temp_result.stdout.strip().replace("temp=", "").replace("'C", " degrees Celsius")
 
             # Memory
             mem_result = subprocess.run(["free", "-m"], capture_output=True, text=True, timeout=5)
@@ -1765,7 +1835,7 @@ def handle_command(text):
 MIC_RATE = 16000      # Jabra SPEAK 510 native rate
 VOSK_RATE = 16000    # what the Vosk model expects
 
-model = Model("/home/sage/vosk-model-small-en-us-0.15")
+model = Model("/home/sage/vosk-model-en-us-0.22-lgraph")
 
 # Initialize wake word audio buffer
 oww_audio_buffer = np.zeros(32000, dtype=np.int16)
@@ -1805,17 +1875,8 @@ try:
 except Exception as e:
     print(f"hey_sage model not loaded: {e}", flush=True)
 
-# Load hey_claude wake word model
+# Claude wake word is detected via Vosk only — OWW model is not used
 oww_claude_session = None
-oww_claude_input = None
-OWW_CLAUDE_THRESHOLD = 0.90
-try:
-    import onnxruntime as _ort
-    oww_claude_session = _ort.InferenceSession("/home/sage/hey_claude.onnx")
-    oww_claude_input = oww_claude_session.get_inputs()[0].name
-    print("Wake word model ready (hey claude)", flush=True)
-except Exception as e:
-    print(f"hey_claude model not loaded: {e}", flush=True)
 
 # Suppress Jack/Pulse stderr during PyAudio init
 _devnull = os.open(os.devnull, os.O_WRONLY)
@@ -1827,27 +1888,34 @@ os.close(_devnull)
 os.close(_old_stderr)
 
 # Auto-detect PyAudio mic device index
+# Prefer PulseAudio virtual device (AEC enabled) when pulse routing is active,
+# fall back to raw Jabra ALSA device, then index 1.
 MIC_DEVICE_INDEX = None
+_jabra_index = None
+_pulse_index = None
 for i in range(p.get_device_count()):
     info = p.get_device_info_by_index(i)
     name = info.get("name", "")
-    if ("USB PnP" in name or "Jabra" in name or "USB Audio" in name) and info.get("maxInputChannels", 0) > 0:
-        MIC_DEVICE_INDEX = i
-        break
-if MIC_DEVICE_INDEX is None:
-    MIC_DEVICE_INDEX = 1  # fallback
+    if info.get("maxInputChannels", 0) > 0:
+        if name.lower() == "pulse" and _pulse_index is None:
+            _pulse_index = i
+        if ("USB PnP" in name or "Jabra" in name or "USB Audio" in name) and _jabra_index is None:
+            _jabra_index = i
+if SPEAKER_DEVICE == "pulse" and _pulse_index is not None:
+    MIC_DEVICE_INDEX = _pulse_index   # PulseAudio path (AEC enabled)
+elif _jabra_index is not None:
+    MIC_DEVICE_INDEX = _jabra_index   # raw ALSA fallback
+else:
+    MIC_DEVICE_INDEX = 1              # last resort
 print(f"PyAudio mic index: {MIC_DEVICE_INDEX}", flush=True)
-stream = p.open(
-    format=pyaudio.paInt16,
-    channels=1,
-    rate=MIC_RATE,
-    input=True,
-    input_device_index=MIC_DEVICE_INDEX,
-    frames_per_buffer=8192
-)
-
-# ── Wake words ───────────────────────────────────────────────────────────────
-CLAUDE_WAKE_WORDS = ["hey claude", "hey cloud", "hey clod", "hey clawed", "hey cool", "a claude"]
+# ── Wake words / Claude invocation ───────────────────────────────────────────
+# Claude is only reachable as a command after Sage wakes — no separate wake word
+CLAUDE_INVOKE_PHRASES = [
+    "get claude", "ask claude", "can i ask claude", "i want to ask claude",
+    "hey claude", "switch to claude", "bring up claude", "call claude",
+]
+# Whisper mishearings of "claude" — the name alone in a command is enough to route
+CLAUDE_NAME_VARIANTS = ["claude", "claud", "clawed"]
 
 WAKE_WORDS = [
     # Direct
@@ -1856,15 +1924,98 @@ WAKE_WORDS = [
     "hey say", "a say", "his age", "if age", "a stage",
     "hey suit", "who suit", "ice age", "hey age", "hey page",
     "the sage", "a sage", "hey face", "hey space",
-    "they say", "hey say",
+    "they say", "hey stage", "hate sage", "hey sag",
     "thieves",
 ]
+
+# ── Claude conversation mode — entered via command after Sage wakes ───────────
+def enter_claude_mode():
+    """Start a Claude conversation. Closes and reopens the mic stream internally."""
+    global stream, rec, oww_audio_buffer
+    speak(random.choice([
+        "Sure, let me get Claude. One moment.",
+        "Sure thing, pulling up Claude now.",
+        "On it. Let me grab Claude for you.",
+        "Sure, one second.",
+    ]))
+    stream.stop_stream()
+    stream.close()
+    lights.set_state("claude")
+    in_conversation = True
+    last_activity = time.time()
+    CLAUDE_IDLE_TIMEOUT = 8
+    play_claude_chime()
+    speak_claude(random.choice([
+        "Claude here, what's your question?",
+        "It's Claude, what can I help with?",
+        "Claude here, go ahead.",
+        "This is Claude, I'm listening.",
+        "Claude here, what's on your mind?",
+    ]))
+    while in_conversation:
+        command = whisper_listen(max_seconds=10)
+        if not command or command.strip() == "" or "[blank" in command.lower():
+            if time.time() - last_activity > CLAUDE_IDLE_TIMEOUT:
+                speak_claude("Alright, I'll let you go.")
+                in_conversation = False
+                break
+            play_claude_chime()
+            continue
+        last_activity = time.time()
+        cmd_lower = command.lower()
+        if any(w in cmd_lower for w in ["goodbye", "bye", "that's all", "that is all",
+                                         "never mind", "nevermind", "thank you claude",
+                                         "thanks claude", "all done", "that'll do"]):
+            speak_claude(random.choice(["See you later!", "Bye for now!", "Anytime!"]))
+            in_conversation = False
+            break
+        # Sage keyword handoff
+        sage_keywords = ["timer", "alarm", "weather", "temperature", "remind", "reminder",
+                         "what time", "what day", "what date", "calendar", "schedule",
+                         "firewall", "status", "goodnight", "good night", "good morning",
+                         "play", "pause", "resume", "skip", "next", "previous", "volume",
+                         "what's playing", "what song", "stop music", "stop", "cancel"]
+        if any(kw in cmd_lower for kw in sage_keywords):
+            print(f"Claude handing off to Sage: {command}", flush=True)
+            in_conversation = False
+            lights.set_state("wake")
+            handle_command(command)
+            try:
+                if getattr(whisper_listen, "_spotify_was_playing", False):
+                    whisper_listen._spotify_was_playing = False
+                    _pb = sp.current_playback() if sp else None
+                    if _pb and not _pb.get("is_playing"):
+                        sp.start_playback()
+            except Exception:
+                pass
+            lights.set_state("idle")
+            break
+        # Ask Claude
+        play_thinking_chime()
+        lights.set_state("processing")
+        answer = ask_claude(command)
+        if answer == "__AUTH_FAILED__":
+            speak("Claude isn't available right now. Check the API key.")
+            in_conversation = False
+            break
+        lights.set_state("claude")
+        speak_claude(answer)
+        last_activity = time.time()
+        play_claude_chime()
+    lights.set_state("idle")
+    stream = p.open(format=pyaudio.paInt16, channels=1, rate=MIC_RATE,
+                    input=True, input_device_index=MIC_DEVICE_INDEX, frames_per_buffer=8192)
+    rec.Reset()
+    oww_audio_buffer = np.zeros(32000, dtype=np.int16)
+    whisper_listen._rms_window = []
+
 
 # ── Main loop ────────────────────────────────────────────────────────────────
 print("Sage is listening...")
 sys.stdout.flush()
 
 # First boot ever = "Sage is ready", subsequent restarts = "Sage is back online"
+# Speak BEFORE opening mic stream so "sage" in the greeting doesn't trigger OWW
 _boot_marker = Path.home() / ".sage_has_booted"
 if _boot_marker.exists():
     speak("Sage is back online")
@@ -1872,6 +2023,16 @@ else:
     speak("Sage is ready")
     _boot_marker.touch()
 lights.set_state("idle")
+time.sleep(0.5)  # let speaker audio fully clear before opening mic
+
+stream = p.open(
+    format=pyaudio.paInt16,
+    channels=1,
+    rate=MIC_RATE,
+    input=True,
+    input_device_index=MIC_DEVICE_INDEX,
+    frames_per_buffer=8192
+)
 
 while True:
     # Check if alarm thread needs the mic
@@ -1904,6 +2065,13 @@ while True:
 
     data_raw = stream.read(4096, exception_on_overflow=False)
     rms = audioop.rms(data_raw, 2)
+    # Rolling peak rms over last 10 chunks (~2.5s) — OWW buffer spans same window
+    if not hasattr(whisper_listen, '_rms_window'):
+        whisper_listen._rms_window = []
+    whisper_listen._rms_window.append(rms)
+    if len(whisper_listen._rms_window) > 10:
+        whisper_listen._rms_window.pop(0)
+    rms_peak = max(whisper_listen._rms_window)
     # Downsample to 16k for both Vosk and OWW
     data16k_bytes = audioop.ratecv(data_raw, 2, 1, MIC_RATE, 16000, None)[0]
     data = audioop.ratecv(data_raw, 2, 1, MIC_RATE, VOSK_RATE, None)[0]
@@ -1913,201 +2081,151 @@ while True:
     oww_audio_buffer = np.roll(oww_audio_buffer, -len(chunk_16k))
     oww_audio_buffer[-len(chunk_16k):] = chunk_16k[:len(oww_audio_buffer)]
 
+    # OWW: only True in the iteration OWW actually scores above threshold
     oww_detected = False
-    oww_claude_detected = False
     if not hasattr(whisper_listen, '_oww_counter'):
         whisper_listen._oww_counter = 0
     whisper_listen._oww_counter += 1
-    if whisper_listen._oww_counter >= 11 and oww_features and oww_session:
+    if whisper_listen._oww_counter >= 5 and oww_features and oww_session:
         whisper_listen._oww_counter = 0
         try:
             embeddings = oww_features.embed_clips(oww_audio_buffer.reshape(1, -1), batch_size=1)
             emb_flat = np.array(embeddings).reshape(1, -1).astype(np.float32)
             oww_score = oww_session.run(None, {oww_input_name: emb_flat})[0][0][0]
-            if oww_score > 0.3:
-                print(f"Hey Sage OWW score: {oww_score:.3f}{'  *** TRIGGERED ***' if oww_score > OWW_THRESHOLD else ''}", flush=True)
+            if oww_score > OWW_THRESHOLD or oww_score > 0.5:
+                print(f"Hey Sage OWW score: {oww_score:.3f} rms_peak:{rms_peak}{'  *** TRIGGERED ***' if oww_score > OWW_THRESHOLD else ''}", flush=True)
             if oww_score > OWW_THRESHOLD:
                 oww_detected = True
+                whisper_listen._oww_last_trigger = time.time()
                 oww_audio_buffer = np.zeros(32000, dtype=np.int16)
-            if oww_claude_session and not oww_detected:
-                claude_score = oww_claude_session.run(None, {oww_claude_input: emb_flat})[0][0][0]
-                if claude_score > 0.3:
-                    print(f"Claude OWW score: {claude_score:.3f}", flush=True)
-                if claude_score > OWW_CLAUDE_THRESHOLD:
-                    oww_claude_detected = True
-                    print(f"Claude OWW triggered: {claude_score:.3f}", flush=True)
-                    oww_audio_buffer = np.zeros(32000, dtype=np.int16)
         except Exception:
             pass
 
-    # ── Vosk: full utterance detection ───────────────────────────────────────
+    # ── Sage OWW primary trigger — fires immediately without waiting for Vosk ─
+    if oww_detected and rms_peak > 420:
+        print(f"OWW primary trigger: {oww_score:.3f} rms_peak:{rms_peak}", flush=True)
+        lights.set_state("wake")
+        stream.stop_stream()
+        stream.close()
+        greeting = random.choice([
+            "Sage here, how can I assist?",
+            "Sage here, what can I do for you?",
+            "It's Sage, go ahead.",
+            "Sage here, what's up?",
+            "This is Sage, I'm listening.",
+        ])
+        command = whisper_listen(spoken_prompt=greeting)
+        start_timer._cmd_time = time.time()  # capture for timer compensation
+        _dismiss_words = ("never mind", "nevermind", "cancel", "nothing",
+                          "forget it", "false alarm", "sorry", "no", "nope",
+                          "go away", "stop listening", "dismiss")
+        if command and any(d in command.lower() for d in _dismiss_words):
+            speak(random.choice(["No worries.", "Alright.", "Standing by."]))
+        elif command and (any(p in command.lower() for p in CLAUDE_INVOKE_PHRASES) or any(n in command.lower() for n in CLAUDE_NAME_VARIANTS)):
+            if claude_client:
+                enter_claude_mode()
+                continue  # stream already reopened inside enter_claude_mode
+            else:
+                speak("Claude isn't available right now.")
+        elif command:
+            handle_command(command)
+            lights.set_state("success")
+        else:
+            play_error_chime()  # ugly buzzy chime = didn't catch anything, going idle
+        try:
+            if getattr(whisper_listen, "_spotify_was_playing", False):
+                whisper_listen._spotify_was_playing = False
+                _pb = sp.current_playback() if sp else None
+                if _pb and not _pb.get("is_playing"):
+                    sp.start_playback()
+        except Exception:
+            pass
+        lights.set_state("idle")
+        stream = p.open(
+            format=pyaudio.paInt16,
+            channels=1,
+            rate=MIC_RATE,
+            input=True,
+            input_device_index=MIC_DEVICE_INDEX,
+            frames_per_buffer=8192
+        )
+        rec.Reset()
+        oww_audio_buffer = np.zeros(32000, dtype=np.int16)
+        whisper_listen._oww_last_trigger = 0
+        whisper_listen._rms_window = []  # clear stale rms_peak after recording session
+        continue
+
+    # ── Vosk: fallback utterance detection ────────────────────────────────────
     text = ""
     vosk_detected = False
-    claude_detected = False
+    if not hasattr(whisper_listen, '_vosk_last_trigger'):
+        whisper_listen._vosk_last_trigger = 0
     if rec.AcceptWaveform(data):
         result = json.loads(rec.Result())
         text = result.get("text", "")
-        if text:
+        if text and (len(text.split()) > 1 or any(w in text.lower() for w in WAKE_WORDS)):
             print(f"Heard: {text} (energy: {rms})")
             sys.stdout.flush()
-        vosk_detected = any(w in text.lower() for w in WAKE_WORDS)
-        claude_detected = any(w in text.lower() for w in CLAUDE_WAKE_WORDS)
-        # Claude requires BOTH OWW + Vosk to agree, or Vosk alone with a "hey claude" phrase
-        # OWW alone is too noisy — background sounds trigger it
-        if claude_detected and claude_client and not (oww_detected or vosk_detected):
-            print(f"Claude wake word detected!")
-            sys.stdout.flush()
-            stream.stop_stream()
-            stream.close()
-            lights.set_state("claude")
-            # ── Claude conversation loop ──
-            in_conversation = True
-            last_activity = time.time()
-            CLAUDE_IDLE_TIMEOUT = 8  # seconds of silence → auto-exit
-            play_claude_chime()  # "I'm listening" chime
-            claude_greeting = random.choice([
-                "Claude here, what's your question?",
-                "It's Claude, what can I help with?",
-                "Claude here, go ahead.",
-                "This is Claude, I'm listening.",
-                "Claude here, what's on your mind?",
-            ])
-            speak_claude(claude_greeting)
-            while in_conversation:
-                command = whisper_listen(max_seconds=10)
-                if not command or command.strip() == "" or "[blank" in command.lower():
-                    if time.time() - last_activity > CLAUDE_IDLE_TIMEOUT:
-                        speak_claude("Alright, I'll let you go.")
-                        in_conversation = False
-                        break
-                    # Still within idle window — chime and listen again
-                    play_claude_chime()
-                    continue
-                last_activity = time.time()
-                cmd_lower = command.lower()
-                # Exit phrases
-                if any(w in cmd_lower for w in ["goodbye", "bye", "that's all", "that is all", "never mind", "nevermind", "thank you claude", "thanks claude", "all done", "that'll do"]):
-                    speak_claude(random.choice(["See you later!", "Bye for now!", "Anytime!"]))
-                    in_conversation = False
-                    break
-                # Switch to Sage — listen for the actual command
-                if any(w in cmd_lower for w in ["hey sage", "sage set", "sage what"]):
-                    speak("Switching to Sage — go ahead.")
-                    in_conversation = False
-                    lights.set_state("wake")
-                    followup = whisper_listen()
-                    if followup:
-                        handle_command(followup)
-                    lights.set_state("idle")
-                    break
-                # Check if this is a Sage command — hand off seamlessly
-                sage_keywords = ["timer", "time for", "times for", "alarm",
-                                 "weather", "temperature", "outside",
-                                 "remind", "reminder",
-                                 "what time", "what day", "what date",
-                                 "calendar", "schedule", "agenda",
-                                 "firewall", "status",
-                                 "goodnight", "good night", "bedtime",
-                                 "good morning", "wake up",
-                                 "play", "pause", "resume", "skip", "next",
-                                 "previous", "volume", "what's playing",
-                                 "what song", "stop music",
-                                 "stop", "cancel"]
-                if any(kw in cmd_lower for kw in sage_keywords):
-                    print(f"Claude handing off to Sage: {command}", flush=True)
-                    in_conversation = False
-                    # Hand off to Sage
-                    lights.set_state("wake")
-                    handle_command(command)
-                    # Resume Spotify if it was paused for listening
-                    try:
-                        if getattr(whisper_listen, "_spotify_was_playing", False):
-                            whisper_listen._spotify_was_playing = False
-                            _pb = sp.current_playback() if sp else None
-                            if _pb and not _pb.get("is_playing"):
-                                sp.start_playback()
-                    except Exception:
-                        pass
-                    lights.set_state("idle")
-                    break
-
-                # Process with Claude
-                play_thinking_chime()  # Claude is thinking
-                print(f"Asking Claude: {command}", flush=True)
-                lights.set_state("processing")
-                answer = ask_claude(command)
-                print(f"Claude says: {answer}", flush=True)
-                lights.set_state("claude")
-                speak_claude(answer)
-                last_activity = time.time()  # reset idle clock after Claude speaks
-                # Ready for follow-up chime
-                play_claude_chime()
-            lights.set_state("idle")
-            # Reopen mic for Sage
-            stream = p.open(
-                format=pyaudio.paInt16,
-                channels=1,
-                rate=MIC_RATE,
-                input=True,
-                input_device_index=MIC_DEVICE_INDEX,
-                frames_per_buffer=8192
-            )
-            rec.Reset()
-            oww_audio_buffer = np.zeros(32000, dtype=np.int16)
+        if any(w in text.lower() for w in WAKE_WORDS):
+            vosk_detected = True
+            whisper_listen._vosk_last_trigger = time.time()
 
 
-
-        if oww_detected or vosk_detected:
-            source = f"OWW score: {oww_score:.3f}" if oww_detected else f"Vosk: {text}"
-            print(f"Wake word detected! ({source})")
-            lights.set_state("wake")
-            sys.stdout.flush()
-            # Fully close the mic so arecord can use the device
-            stream.stop_stream()
-            stream.close()
-            greeting = random.choice([
-                "Sage here, how can I assist?",
-                "Sage here, what can I do for you?",
-                "It's Sage, go ahead.",
-                "Sage here, what's up?",
-                "This is Sage, I'm listening.",
-            ])
-            command = whisper_listen(spoken_prompt=greeting)
-            _dismiss_words = ("never mind", "nevermind", "cancel", "nothing",
-                              "forget it", "false alarm", "sorry", "no", "nope",
-                              "go away", "stop listening", "dismiss")
-            if command and any(d in command.lower() for d in _dismiss_words):
-                print(f"Dismissed: {command}", flush=True)
-                speak(random.choice(["No worries.", "Alright.", "Standing by."]))
-            elif command:
-                handle_command(command)
-                lights.set_state("success")
+    # Vosk fallback — only reached if OWW didn't fire, requires minimum energy
+    _wake_confirmed = vosk_detected and rms_peak > 420
+    if _wake_confirmed:
+        source = f"Vosk: {text}"
+        print(f"Wake word detected! ({source})")
+        lights.set_state("wake")
+        sys.stdout.flush()
+        # Fully close the mic so arecord can use the device
+        stream.stop_stream()
+        stream.close()
+        greeting = random.choice([
+            "Sage here, how can I assist?",
+            "Sage here, what can I do for you?",
+            "It's Sage, go ahead.",
+            "Sage here, what's up?",
+            "This is Sage, I'm listening.",
+        ])
+        command = whisper_listen(spoken_prompt=greeting)
+        _dismiss_words = ("never mind", "nevermind", "cancel", "nothing",
+                          "forget it", "false alarm", "sorry", "no", "nope",
+                          "go away", "stop listening", "dismiss")
+        if command and any(d in command.lower() for d in _dismiss_words):
+            print(f"Dismissed: {command}", flush=True)
+            speak(random.choice(["No worries.", "Alright.", "Standing by."]))
+        elif command and (any(p in command.lower() for p in CLAUDE_INVOKE_PHRASES) or any(n in command.lower() for n in CLAUDE_NAME_VARIANTS)):
+            if claude_client:
+                enter_claude_mode()
+                continue  # stream already reopened inside enter_claude_mode
             else:
-                # One gentle retry
-                speak(random.choice(["I'm still here.", "Go ahead.", "Try again."]))
-                command = whisper_listen()
-                if command and any(d in command.lower() for d in _dismiss_words):
-                    print(f"Dismissed on retry: {command}", flush=True)
-                    speak(random.choice(["No worries.", "Alright.", "Standing by."]))
-                elif command:
-                    handle_command(command)
-            # Resume Spotify if it was paused for listening
-            try:
-                if getattr(whisper_listen, "_spotify_was_playing", False):
-                    whisper_listen._spotify_was_playing = False
-                    _pb = sp.current_playback() if sp else None
-                    if _pb and not _pb.get("is_playing"):
-                        sp.start_playback()
-            except Exception:
-                pass
-            lights.set_state("idle")
-            # Reopen the mic stream for Vosk wake word detection
-            stream = p.open(
-                format=pyaudio.paInt16,
-                channels=1,
-                rate=MIC_RATE,
-                input=True,
-                input_device_index=MIC_DEVICE_INDEX,
-                frames_per_buffer=8192
-            )
-            rec.Reset()
+                speak("Claude isn't available right now.")
+        elif command:
+            handle_command(command)
+            lights.set_state("success")
+        else:
+            play_error_chime()  # ugly buzzy chime = didn't catch anything, going idle
+        # Resume Spotify if it was paused for listening
+        try:
+            if getattr(whisper_listen, "_spotify_was_playing", False):
+                whisper_listen._spotify_was_playing = False
+                _pb = sp.current_playback() if sp else None
+                if _pb and not _pb.get("is_playing"):
+                    sp.start_playback()
+        except Exception:
+            pass
+        lights.set_state("idle")
+        # Reopen the mic stream for Vosk wake word detection
+        stream = p.open(
+            format=pyaudio.paInt16,
+            channels=1,
+            rate=MIC_RATE,
+            input=True,
+            input_device_index=MIC_DEVICE_INDEX,
+            frames_per_buffer=8192
+        )
+        rec.Reset()
+        whisper_listen._rms_window = []  # clear stale rms_peak after recording session
+
+# Built by Britta Seisums Davis / ohgollybritta

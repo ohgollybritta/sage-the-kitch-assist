@@ -106,3 +106,5 @@ JABRA_MIC_NUMID       = 6       # amixer numid for Mic Capture Volume
 JABRA_MIC_MAX         = 7       # max value (9.00 dB)
 JABRA_DEVICE_NAME     = "Jabra SPEAK 510 USB"
 JABRA_ALSA_DEVICE     = "plughw:1,0"   # adjust card number if needed
+
+# Built by Britta Seisums Davis / ohgollybritta

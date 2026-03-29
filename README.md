@@ -1,4 +1,4 @@
-# Sage v1.4.1 🌿
+# Sage v1.4.3 🌿
 ### A privacy-first voice assistant for your kitchen, built on a Raspberry Pi.
 
 Sage is an open-source voice assistant that does the everyday things a kitchen assistant should do — set timers, give weather reports, manage reminders, chat with Claude AI — without sending your voice to the cloud. The voice pipeline runs entirely on a Raspberry Pi.
@@ -9,20 +9,32 @@ Sage is an open-source voice assistant that does the everyday things a kitchen a
 
 ## Why Sage?
 
-In early 2025, the final opt-out for local voice processing was quietly eliminated from major commercial smart speakers. The official explanation cited generative AI, claiming new features require cloud connectivity. As a result, users lost the ability to keep any of their voice data on-device, with no alternatives provided.
+In early 2025, the last remaining opt-out for local voice processing was quietly removed from major commercial smart speakers. The official reason was generative AI — new features need the cloud. The effect was that users lost the ability to keep any part of their voice data on-device, with no alternative offered.
 
-Sage offers that alternative. Its voice pipeline operates entirely locally, ensuring audio is never stored, uploaded, or sent anywhere except out of your speaker.
+Sage is that alternative. The voice pipeline runs locally. Audio is never stored, never uploaded, never sent anywhere except out your speaker.
 
 ---
 
 ## Hardware
 
 - **Raspberry Pi 4** (CanaKit or equivalent)
-- **USB microphone and speaker** — Jabra Speak 510 recommended, but any USB mic works out of the box
+- **USB microphone** — any USB mic works out of the box
+- **USB speaker** — any USB speaker works out of the box
 - **WS2812B LED ring** (optional — 24-bit, for visual indicators)
-- **Female-to-female jumper wires** (2 needed for LED ring)
+- **Female-to-female jumper wires** (3 needed for LED ring)
 
-Sage is hardware-agnostic — it auto-detects your USB mic and speaker on startup. No manual configuration needed for standard setups. A USB conference speakerphone such as the **Jabra SPEAK 510** is optional but highly recommended if you want to use voice commands while music is playing. It combines mic and speaker into one USB device and includes hardware acoustic echo cancellation (AEC), which lets Sage hear "Hey Sage" even while audio is playing through it. If you're using a Jabra SPEAK 510, see [`jabra_config.py`](jabra_config.py) for device-specific settings and notes.
+### Recommended: USB speakerphone (optional upgrade)
+
+A **USB conference speakerphone** like the **Jabra SPEAK 510** is optional but highly recommended if you want to use voice commands while music is playing. It combines mic and speaker into one USB device and includes hardware acoustic echo cancellation (AEC), which lets Sage hear "Hey Sage" even while audio is playing through it.
+
+**Jabra SPEAK 510 benefits:**
+- Single USB device = both mic and speaker on one card (e.g. `plughw:1,0`) — no separate detection needed
+- Hardware AEC cancels speaker output from the mic signal — Sage can hear you over music
+- Omnidirectional mic array designed for voice pickup across a room
+- Works at the Pi's native 16000 Hz sample rate with no conversion needed
+- Max volume: ALSA numid=4 (playback, 0–11), numid=6 (mic, 0–7)
+
+> Sage is hardware-agnostic — it auto-detects your USB mic and speaker on startup. No manual configuration needed for standard setups. If you're using a Jabra SPEAK 510, see [`jabra_config.py`](jabra_config.py) for device-specific settings and notes.
 
 ---
 
@@ -222,17 +234,76 @@ sudo ufw allow proto tcp from 192.168.0.0/24 to any port 1:65535 comment 'Spotif
 sudo ufw reload
 ```
 
-#### Disable PulseAudio (important)
+#### Set up PulseAudio for echo cancellation (recommended)
 
-PulseAudio grabs the audio device and blocks direct ALSA access. Sage and Raspotify both need direct access to `plughw`:
+Sage routes audio through PulseAudio's software echo cancellation (AEC) when PulseAudio is available. This lets Sage hear "Hey Sage" even while music is playing through the same speaker — the AEC removes the speaker output from the mic signal in real time.
+
+**Enable PulseAudio user service:**
 
 ```bash
-systemctl --user stop pulseaudio.socket pulseaudio.service
-systemctl --user disable pulseaudio.socket pulseaudio.service
-systemctl --user mask pulseaudio.socket pulseaudio.service
-mkdir -p ~/.config/pulse
-echo 'autospawn = no' > ~/.config/pulse/client.conf
+# Enable linger so PulseAudio starts at boot without a login session
+sudo loginctl enable-linger $USER
+
+# Unmask and enable the PulseAudio user service
+systemctl --user unmask pulseaudio pulseaudio.socket
+systemctl --user enable --now pulseaudio
 ```
+
+**Create the Jabra AEC config snippet** (or adapt for your hardware):
+
+```bash
+sudo tee /etc/pulse/default.pa.d/jabra-aec.pa << 'EOF'
+### Sage - USB speakerphone with Echo Cancellation
+
+# Speaker output
+load-module module-alsa-sink device=plughw:1,0 sink_name=jabra_sink rate=48000
+
+# Mic input (native 16kHz mono)
+load-module module-alsa-source device=plughw:1,0 source_name=jabra_source rate=16000 channels=1
+
+# Echo cancellation virtual devices (webrtc AEC)
+load-module module-echo-cancel source_master=jabra_source sink_master=jabra_sink source_name=jabra_ec_source sink_name=jabra_ec_sink
+
+# Make AEC devices the default
+set-default-sink jabra_ec_sink
+set-default-source jabra_ec_source
+EOF
+```
+
+> Replace `plughw:1,0` with your actual speaker/mic card number if needed (check `aplay -l`). The card number must match your hardware — see the note on dynamic card numbers below.
+
+**Update sage.service to connect to PulseAudio:**
+
+```bash
+sudo tee /etc/systemd/system/sage.service << 'EOF'
+[Unit]
+Description=Sage Voice Assistant
+After=network.target sound.target pulseaudio.service
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=sage
+WorkingDirectory=/home/sage
+ExecStartPre=/bin/sleep 5
+Environment=JACK_NO_START_SERVER=1
+Environment=PULSE_LOG=0
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=PULSE_SERVER=unix:/run/user/1000/pulse/native
+ExecStart=/usr/bin/python3 /home/sage/sage.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl daemon-reload
+```
+
+Sage auto-detects the PulseAudio socket at startup. When PulseAudio is running, Sage routes all audio (`aplay`, `arecord`, PyAudio) through the `jabra_ec_source`/`jabra_ec_sink` virtual devices, engaging AEC. When PulseAudio is not available, Sage falls back to direct ALSA without AEC.
 
 #### Verify
 
@@ -583,9 +654,10 @@ No soldering required — use female-to-female jumper wires.
 
 **Speaker not working**
 - `sage.py` sets volume to max on startup — verify card numbers match your hardware
-- Check with `aplay -l` and update `SPEAKER_DEVICE` in sage.py
-- Make sure PulseAudio is disabled — it grabs the audio device and blocks direct ALSA access
+- Check with `aplay -l` and `arecord -l` to confirm the correct ALSA card number
+- If PulseAudio is running, Sage routes through it automatically — check `XDG_RUNTIME_DIR=/run/user/1000 pactl info` to verify PulseAudio is up
 - Check `sudo fuser -v /dev/snd/*` to see what's holding the audio devices
+- If PulseAudio fails to load the Jabra source: the raw device may already be held by another process — ensure sage.service is stopped before debugging PulseAudio device loading
 
 **Spotify not playing / "Can't find the speaker"**
 - Raspotify and Spotipy must be on the **same Spotify account**
@@ -602,10 +674,11 @@ No soldering required — use female-to-female jumper wires.
 - Token may need refresh — delete `~/spotipy.cache` and re-run `python3 ~/spotify_auth.py`
 
 **Wake word not detected over music**
-- A USB conference speakerphone with built-in echo cancellation (e.g., **Jabra SPEAK 510**) is the recommended solution — it handles AEC in hardware so Sage can hear you over its own speaker output
+- With PulseAudio AEC enabled (see setup), Sage uses the echo-cancelled mic signal — this is the most effective approach
+- A USB conference speakerphone like the **Jabra SPEAK 510** is also recommended — hardware AEC provides a second layer of echo cancellation
 - Sage auto-pauses Spotify when it detects the wake word, but the word must be heard first
-- With a single-mic setup, keeping Spotify volume at 75% or lower helps the mic hear you
-- The OWW wake word threshold can be tuned in `sage.py` (`OWW_THRESHOLD`) — higher values (0.80–0.90) reduce false triggers from ambient noise like running water or background TV
+- With a single-mic setup and no AEC, keeping Spotify volume at 75% or lower helps
+- The OWW wake word threshold can be tuned in `sage.py` (`OWW_THRESHOLD`) — higher values (0.80–0.90) reduce false triggers from ambient noise
 
 **Too many false wake triggers (TV, ambient noise)**
 - Raise `OWW_THRESHOLD` in `sage.py` (default: 0.85, max useful: ~0.95)
@@ -636,10 +709,10 @@ No soldering required — use female-to-female jumper wires.
 
 - Free to use, fork, and modify for personal and non-commercial use
 - Commercial use requires written permission from the copyright holder
-- Attribution required: **Britta Davis / [ohgollybritta](https://ohgollybritta.com)**
+- Attribution required: **Britta Davis / [oh golly britta](https://ohgollybritta.com)**
 
 See [LICENSE](LICENSE) for full terms.
 
 ---
 
-*Built by [ohgollybritta](https://ohgollybritta.com)*
+*Built by [oh golly britta](https://ohgollybritta.com)*
