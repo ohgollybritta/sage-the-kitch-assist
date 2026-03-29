@@ -1,4 +1,4 @@
-# Sage v1.4 🌿
+# Sage v1.4.1 🌿
 ### A privacy-first voice assistant for your kitchen, built on a Raspberry Pi.
 
 Sage is an open-source voice assistant that does the everyday things a kitchen assistant should do — set timers, give weather reports, manage reminders, chat with Claude AI — without sending your voice to the cloud. The voice pipeline runs entirely on a Raspberry Pi.
@@ -9,25 +9,20 @@ Sage is an open-source voice assistant that does the everyday things a kitchen a
 
 ## Why Sage?
 
-In early 2025, the last remaining opt-out for local voice processing was quietly removed from major commercial smart speakers. The official reason was generative AI — new features need the cloud. The effect was that users lost the ability to keep any part of their voice data on-device, with no alternative offered.
+In early 2025, the final opt-out for local voice processing was quietly eliminated from major commercial smart speakers. The official explanation cited generative AI, claiming new features require cloud connectivity. As a result, users lost the ability to keep any of their voice data on-device, with no alternatives provided.
 
-Sage is that alternative. The voice pipeline runs locally. Audio is never stored, never uploaded, never sent anywhere except out your speaker.
+Sage offers that alternative. Its voice pipeline operates entirely locally, ensuring audio is never stored, uploaded, or sent anywhere except out of your speaker.
 
 ---
 
 ## Hardware
 
 - **Raspberry Pi 4** (CanaKit or equivalent)
-- **USB microphone** — any USB mic works out of the box
-- **USB speaker** — any USB speaker works out of the box
+- **USB microphone and speaker** — Jabra Speak 510 recommended, but any USB mic works out of the box
 - **WS2812B LED ring** (optional — 24-bit, for visual indicators)
-- **Female-to-female jumper wires** (3 needed for LED ring)
+- **Female-to-female jumper wires** (2 needed for LED ring)
 
-### Recommended: USB speakerphone (optional upgrade)
-
-A **USB conference speakerphone** like the **Jabra SPEAK 510** is optional but highly recommended if you want to use voice commands while music is playing. It combines mic and speaker into one USB device and includes hardware acoustic echo cancellation (AEC), which lets Sage hear "Hey Sage" even while audio is playing through it.
-
-> Sage is hardware-agnostic — it auto-detects your USB mic and speaker on startup. No manual configuration needed for standard setups. If you're using a Jabra SPEAK 510, see [`jabra_config.py`](jabra_config.py) for device-specific settings and notes.
+Sage is hardware-agnostic — it auto-detects your USB mic and speaker on startup. No manual configuration needed for standard setups. A USB conference speakerphone such as the **Jabra SPEAK 510** is optional but highly recommended if you want to use voice commands while music is playing. It combines mic and speaker into one USB device and includes hardware acoustic echo cancellation (AEC), which lets Sage hear "Hey Sage" even while audio is playing through it. If you're using a Jabra SPEAK 510, see [`jabra_config.py`](jabra_config.py) for device-specific settings and notes.
 
 ---
 
@@ -336,8 +331,10 @@ ANTHROPIC_API_KEY=your_anthropic_api_key
 1. Create a [Spotify Developer App](https://developer.spotify.com/dashboard)
 2. Set the Redirect URI to `http://127.0.0.1:8888/callback` in your app settings
 3. Add your Client ID and Secret to `~/.sage_credentials`
-4. Run `python3 ~/spotify_auth.py` — open the URL in a browser, log in, paste the redirect URL back
+4. Run `python3 ~/spotify_auth.py` — open the URL in a browser, log in with the **Sage/group account**, paste the redirect URL back
 5. Token is cached at `~/spotipy.cache` — Sage will auto-refresh it
+
+> **Required scopes:** `user-modify-playback-state user-read-playback-state user-library-read` — the `user-library-read` scope is needed for "Play Spotify / Play my liked songs" to work. If you need to re-auth to add this scope, delete `~/spotipy.cache` and re-run `spotify_auth.py`.
 
 ### 9. Personal config (optional)
 
@@ -402,9 +399,65 @@ sudo ufw allow ssh
 sudo ufw --force enable
 ```
 
-### 12. Train your wake word (optional)
+### 12. Train your wake word (recommended)
 
-The included `hey_sage.onnx` and `hey_claude.onnx` models work out of the box but were trained on one family's voices. For best results, train your own using [openWakeWord](https://github.com/dscripka/openWakeWord). Record 30+ samples per household member saying "hey sage" and retrain.
+The included `hey_sage.onnx` model is a starting point, but **training on your own voices in your actual environment dramatically reduces false triggers** — especially in noisy homes with TVs, running water, and multiple people.
+
+Sage includes a full custom training pipeline (`train_hey_sage.py`) that combines your real recordings with piper synthetic voices across multiple voice styles.
+
+#### Step 1 — Install training dependencies
+
+```bash
+pip3 install torch --index-url https://download.pytorch.org/whl/cpu --break-system-packages
+pip3 install torchaudio --index-url https://download.pytorch.org/whl/cpu --break-system-packages
+pip3 install torchinfo torchmetrics torch-audiomentations pronouncing speechbrain --break-system-packages
+git clone https://github.com/rhasspy/piper-sample-generator.git
+pip3 install ./piper-sample-generator --break-system-packages
+```
+
+#### Step 2 — Record positive samples (one person at a time)
+
+Run this with your **background noise on** — TV at normal volume, kitchen sounds, whatever is typical in your home. The model needs to learn your voices **over** that noise, not in silence.
+
+```bash
+/home/sage/record_samples.sh positive
+```
+
+- Press Enter to record each 2-second clip — say **"Hey Sage"** naturally
+- Aim for **50 clips per voice** — vary tone, speed, volume, and distance
+- Run again for each person in your household
+
+#### Step 3 — Record negative samples
+
+Keep the background noise on. Record ambient sound **without** saying "Hey Sage":
+
+```bash
+/home/sage/record_samples.sh negative
+```
+
+Let it capture: TV dialogue, normal conversation, kitchen sounds, music, running water. Aim for 50+ clips. This is what teaches the model what **not** to trigger on.
+
+> **Why noise-on for both?** The model learns the *contrast* between your voice saying "Hey Sage" and the ambient noise. If you record positives with noise but negatives in silence (or vice versa), the model may learn the background rather than your voice.
+
+#### Step 4 — Run training
+
+```bash
+nohup python3 /home/sage/train_hey_sage.py > /home/sage/wake_word_training/training.log 2>&1 &
+tail -f /home/sage/wake_word_training/training.log
+```
+
+Training generates synthetic positive samples using piper TTS (across all installed voices), augments all clips with noise and speed variation, extracts openWakeWord embeddings, and trains a DNN classifier for 200 epochs. On a Pi 4, expect 30–60 minutes.
+
+#### Step 5 — Deploy
+
+```bash
+cp /home/sage/wake_word_training/output/hey_sage.onnx /home/sage/hey_sage.onnx
+sudo systemctl restart sage
+```
+
+#### Tuning sensitivity
+
+The `OWW_THRESHOLD` in `sage.py` controls how confident the model must be before triggering (0.0–1.0). Raise it if you get false triggers from ambient noise; lower it if Sage is missing your wake word. Sage also requires **both OWW and Vosk to agree** before triggering — this dual-confirmation significantly reduces false wakes from TV dialogue and background speech.
 
 ---
 
@@ -513,9 +566,10 @@ No soldering required — use female-to-female jumper wires.
 ## Troubleshooting
 
 **Wake word not triggering**
-- The included wake word models may not match your voice — retrain with your own samples
-- Vosk fallback is enabled with common mishearings
+- The included wake word models may not match your voice — retrain with your own samples using `train_hey_sage.py` (see Step 12)
+- Vosk fallback is enabled with common mishearings of "hey sage"
 - Move the mic away from the Pi's fan if possible (USB extension cable helps)
+- Lower `OWW_THRESHOLD` in `sage.py` if Sage consistently misses you (try 0.75)
 
 **Whisper recognition is poor**
 - Fan noise is the most common issue — a USB extension cable for the mic helps significantly
@@ -548,10 +602,15 @@ No soldering required — use female-to-female jumper wires.
 - Token may need refresh — delete `~/spotipy.cache` and re-run `python3 ~/spotify_auth.py`
 
 **Wake word not detected over music**
-- A USB conference speakerphone with built-in echo cancellation (e.g., **Jabra SPEAK 510**) is the recommended solution — it handles AEC in hardware
+- A USB conference speakerphone with built-in echo cancellation (e.g., **Jabra SPEAK 510**) is the recommended solution — it handles AEC in hardware so Sage can hear you over its own speaker output
 - Sage auto-pauses Spotify when it detects the wake word, but the word must be heard first
 - With a single-mic setup, keeping Spotify volume at 75% or lower helps the mic hear you
 - The OWW wake word threshold can be tuned in `sage.py` (`OWW_THRESHOLD`) — higher values (0.80–0.90) reduce false triggers from ambient noise like running water or background TV
+
+**Too many false wake triggers (TV, ambient noise)**
+- Raise `OWW_THRESHOLD` in `sage.py` (default: 0.85, max useful: ~0.95)
+- Train a custom wake word model using your real environment's background noise — see Step 12
+- Sage requires both OWW and Vosk to confirm the wake word — this dual-check catches most TV dialogue false triggers
 
 **Service won't start**
 - Check logs: `journalctl -u sage -f`
@@ -577,10 +636,10 @@ No soldering required — use female-to-female jumper wires.
 
 - Free to use, fork, and modify for personal and non-commercial use
 - Commercial use requires written permission from the copyright holder
-- Attribution required: **Britta Davis / [oh golly britta](https://ohgollybritta.com)**
+- Attribution required: **Britta Davis / [ohgollybritta](https://ohgollybritta.com)**
 
 See [LICENSE](LICENSE) for full terms.
 
 ---
 
-*Built by [oh golly britta](https://ohgollybritta.com)*
+*Built by [ohgollybritta](https://ohgollybritta.com)*
