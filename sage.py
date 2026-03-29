@@ -386,7 +386,7 @@ def play_chime():
     s += _chime_note(784, 0.28)   # G5 — land high (open, attentive)
     _play_raw(s)
 
-def _buzz_note(freq, dur, sr=22050, amp=22000):
+def _buzz_note(freq, dur, sr=22050, amp=10000):
     """Harsh buzzy note — square-wave-like odd harmonics, for error feedback."""
     n = int(sr * dur)
     samples = []
@@ -801,16 +801,37 @@ reminder_alarming = threading.Event()  # global flag for any reminder going off
 # ── Bedtime mode ─────────────────────────────────────────────────────────────
 bedtime_mode = threading.Event()  # when set, Sage is in do-not-disturb mode
 
+BEDTIME_VOLUME   = 9    # amixer numid=4 value at night
+DAYTIME_VOLUME   = 11   # amixer numid=4 value during the day (full)
+BEDTIME_RMS_GATE = 600  # rms_peak required to wake at night (more deliberate speech needed)
+DAYTIME_RMS_GATE = 600  # rms_peak required to wake during the day
+OWW_RMS_GATE     = DAYTIME_RMS_GATE  # current active gate — adjusted at bedtime/wake
+
+def _set_speaker_volume(level):
+    """Set Jabra speaker volume via amixer (0–11)."""
+    try:
+        subprocess.run(["amixer", "-c", str(_speaker_card), "cset", "numid=4", str(level)],
+                       capture_output=True, timeout=5)
+        print(f"Speaker volume set to {level}", flush=True)
+    except Exception as e:
+        print(f"Volume set error: {e}", flush=True)
+
 def enter_bedtime():
-    """Enter bedtime mode — silence alarms, dim lights, DND."""
+    """Enter bedtime mode — lower volume, raise wake gate, silence alarms, dim lights."""
+    global OWW_RMS_GATE
     bedtime_mode.set()
-    dismiss_alarms()  # stop any active alarms
+    dismiss_alarms()
+    _set_speaker_volume(BEDTIME_VOLUME)
+    OWW_RMS_GATE = BEDTIME_RMS_GATE
     lights.set_state("off")
     print("Bedtime mode ON", flush=True)
 
 def exit_bedtime():
-    """Exit bedtime mode — resume normal operation."""
+    """Exit bedtime mode — restore volume, lower wake gate, resume normal operation."""
+    global OWW_RMS_GATE
     bedtime_mode.clear()
+    _set_speaker_volume(DAYTIME_VOLUME)
+    OWW_RMS_GATE = DAYTIME_RMS_GATE
     lights.set_state("idle")
     print("Bedtime mode OFF", flush=True)
 
@@ -826,11 +847,11 @@ def bedtime_scheduler():
 
         # Auto-bedtime
         if not bedtime_mode.is_set():
-            if is_weekend and hour == 23 and minute == 30:
-                speak("It's 11:30. Goodnight everyone.")
+            if is_weekend and hour == 22 and minute == 30:
+                speak("It's 10:30. Goodnight everyone.")
                 enter_bedtime()
-            elif not is_weekend and hour == 22 and minute == 0:
-                speak("It's 10 o'clock. Goodnight everyone.")
+            elif not is_weekend and hour == 21 and minute == 30:
+                speak("It's 9:30. Goodnight everyone.")
                 enter_bedtime()
 
         # Auto-wake: 6:30am weekdays, 8:30am weekends
@@ -1032,14 +1053,44 @@ update_thread = threading.Thread(target=update_checker, daemon=True)
 update_thread.start()
 print("Update checker active", flush=True)
 
+# ── Fan control (GPIO 14 — CanaKit) ──────────────────────────────────────────
+FAN_PIN = 14
+FAN_ON_TEMP  = 60   # °C — turn fan on
+FAN_OFF_TEMP = 55   # °C — turn fan off (hysteresis prevents chattering)
+_fan_on = False
+
+try:
+    import RPi.GPIO as _GPIO
+    _GPIO.setmode(_GPIO.BCM)
+    _GPIO.setup(FAN_PIN, _GPIO.OUT)
+    _GPIO.output(FAN_PIN, _GPIO.HIGH)   # active-low: HIGH = fan off
+    _fan_gpio_available = True
+    print("Fan controller ready (GPIO 14)", flush=True)
+except Exception as _e:
+    _fan_gpio_available = False
+    print(f"Fan controller not available: {_e}", flush=True)
+
+def _set_fan(on):
+    global _fan_on
+    if not _fan_gpio_available:
+        return
+    _GPIO.output(FAN_PIN, _GPIO.LOW if on else _GPIO.HIGH)  # active-low
+    _fan_on = on
+    print(f"Fan {'ON' if on else 'OFF'}", flush=True)
+
 # ── Temperature monitor ───────────────────────────────────────────────────────
 def temp_monitor():
-    """Check CPU temp every 3 minutes. Warn at 75°C, critical alert at 82°C."""
+    """Check CPU temp every 30s. Control fan at 60°C. Warn at 75°C, critical at 82°C."""
     warned = False   # True once a warning has been sent this hot spell
     while True:
         try:
             with open("/sys/class/thermal/thermal_zone0/temp") as f:
                 temp_c = int(f.read().strip()) / 1000
+            # Fan control
+            if temp_c >= FAN_ON_TEMP and not _fan_on:
+                _set_fan(True)
+            elif temp_c <= FAN_OFF_TEMP and _fan_on:
+                _set_fan(False)
             if temp_c >= 82:
                 msg = f"Critical: I'm running at {temp_c:.0f}°C and may slow down or shut off. Please move me somewhere cooler or check my ventilation."
                 speak(msg)
@@ -1055,7 +1106,7 @@ def temp_monitor():
                 warned = False  # cooled down, reset so we can warn again next spike
         except Exception as e:
             print(f"Temp monitor error: {e}", flush=True)
-        time.sleep(180)
+        time.sleep(30)
 
 temp_thread = threading.Thread(target=temp_monitor, daemon=True)
 temp_thread.start()
@@ -2014,6 +2065,21 @@ def enter_claude_mode():
 print("Sage is listening...")
 sys.stdout.flush()
 
+# Orient to current time — enter bedtime mode silently if rebooting during quiet hours
+def _is_bedtime_now():
+    now = datetime.now()
+    h, m, wd = now.hour, now.minute, now.weekday()
+    is_weekend = wd in [4, 5]
+    wake_hour = 8 if is_weekend else 6
+    bed_hour  = 22 if is_weekend else 21
+    bed_min   = 30
+    after_bed  = (h > bed_hour) or (h == bed_hour and m >= bed_min)
+    before_wake = h < wake_hour
+    return after_bed or before_wake
+
+if _is_bedtime_now():
+    enter_bedtime()  # sets volume + rms gate silently, no announcement
+
 # First boot ever = "Sage is ready", subsequent restarts = "Sage is back online"
 # Speak BEFORE opening mic stream so "sage" in the greeting doesn't trigger OWW
 _boot_marker = Path.home() / ".sage_has_booted"
@@ -2022,7 +2088,8 @@ if _boot_marker.exists():
 else:
     speak("Sage is ready")
     _boot_marker.touch()
-lights.set_state("idle")
+if not bedtime_mode.is_set():
+    lights.set_state("idle")
 time.sleep(0.5)  # let speaker audio fully clear before opening mic
 
 stream = p.open(
@@ -2102,7 +2169,7 @@ while True:
             pass
 
     # ── Sage OWW primary trigger — fires immediately without waiting for Vosk ─
-    if oww_detected and rms_peak > 420:
+    if oww_detected and rms_peak > OWW_RMS_GATE:
         print(f"OWW primary trigger: {oww_score:.3f} rms_peak:{rms_peak}", flush=True)
         lights.set_state("wake")
         stream.stop_stream()
@@ -2172,7 +2239,7 @@ while True:
 
 
     # Vosk fallback — only reached if OWW didn't fire, requires minimum energy
-    _wake_confirmed = vosk_detected and rms_peak > 420
+    _wake_confirmed = vosk_detected and rms_peak > OWW_RMS_GATE
     if _wake_confirmed:
         source = f"Vosk: {text}"
         print(f"Wake word detected! ({source})")
