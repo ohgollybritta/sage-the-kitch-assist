@@ -1,4 +1,4 @@
-# Sage v1.4.8 🌿
+# Sage v1.4.9 🌿
 ### A privacy-first voice assistant for your kitchen, built on a Raspberry Pi.
 
 Sage is an open-source voice assistant that does the everyday things a kitchen assistant should do — set timers, give weather reports, manage reminders, chat with Claude AI — without sending your voice to the cloud. The voice pipeline runs entirely on a Raspberry Pi.
@@ -75,7 +75,7 @@ A **USB conference speakerphone** like the **Jabra SPEAK 510** is optional but h
 
 ### Security & System
 - 🔒 **Firewall control** — "Is the firewall running?" / "Turn on the firewall"
-- 📊 **System status** — "System status" (uptime, CPU temp, memory, disk, firewall)
+- 📊 **System status** — "System status" (uptime, CPU usage, CPU temp, memory, disk, firewall)
 - 🚨 **Intrusion detection** — voice + push alert on failed SSH login attempts
 - 🔄 **Update checker** — notifies every 3 days if system or package updates are available
 
@@ -156,7 +156,7 @@ sudo apt update && sudo apt upgrade -y
 
 ```bash
 sudo apt install -y python3-pip python3-pyaudio git cmake
-pip3 install vosk faster-whisper spotipy openwakeword python-dateutil icalendar --break-system-packages
+pip3 install vosk faster-whisper spotipy python-dateutil icalendar --break-system-packages
 ```
 
 ### 5. Install Vosk model (wake word detection)
@@ -497,38 +497,22 @@ sudo ufw allow ssh
 sudo ufw --force enable
 ```
 
-### 12. Train your wake word (recommended)
+### 12. Wake word tuning
 
-The included `hey_sage.onnx` model is trained entirely from synthetic TTS voices using Piper — no real recordings needed. It works out of the box, but **training on your own voices in your actual environment can further reduce false triggers**.
-
-#### Synthetic training (default — runs on Mac or any desktop)
-
-The default model was trained using 5 diverse Piper TTS voices (male, female, US, UK accents) with varied speed and noise scales:
-- **300 positive clips** — "hey sage" across all voice/speed/noise combinations
-- **600 negative clips** — 20 non-wake-word phrases ("hey there", "hey page", "okay google", etc.)
-- Embeddings extracted via openWakeWord's AudioFeatures
-- Classifier: sklearn MLPClassifier (64→32 hidden layers), exported to ONNX via skl2onnx
-- Validation accuracy: ~100%, positive avg score: 0.88, negative avg score: 0.02
-
-Training on a Mac takes ~5 minutes. On a Pi 4, expect 30–60 minutes.
-
-#### Deploy
-
-```bash
-scp hey_sage.onnx sage@sage.local:~/hey_sage.onnx
-sudo systemctl restart sage
-```
+Wake word detection uses **Vosk** (local speech recognition). Vosk listens continuously and triggers when it hears "hey sage" (or common mishearings like "they sage", "hey stage").
 
 #### Tuning sensitivity
 
-The `OWW_THRESHOLD` in `sage.py` controls how confident the model must be before triggering (0.0–1.0). Raise it if you get false triggers from ambient noise; lower it if Sage is missing your wake word. Sage also requires **both OWW and Vosk to agree** before triggering — this dual-confirmation significantly reduces false wakes from TV dialogue and background speech.
+- `DAYTIME_RMS_GATE` — minimum audio energy to trigger during the day (default: 80). Lower = more sensitive, higher = requires louder speech.
+- `BEDTIME_RMS_GATE` — minimum audio energy to trigger at night (default: 100). Slightly higher to avoid accidental triggers from sleep-talking or ambient noise.
+- Both values are in `sage.py`. Adjust based on your mic distance and environment.
 
 ---
 
 ## How it works
 
 ```
-Wake word detection (openWakeWord + Vosk)
+Wake word detection (Vosk)
               |
      "Hey Sage" detected → Chime → Record audio
               |                         |
@@ -632,13 +616,12 @@ Soldering required to attach jumper wires to the LED ring pads (PWR, GND, DIN). 
 ## Troubleshooting
 
 **Wake word not triggering**
-- The included wake word models may not match your voice — retrain with your own samples using `train_hey_sage.py` (see Step 12)
-- Vosk fallback is enabled with common mishearings of "hey sage"
+- Vosk recognizes "hey sage" and common mishearings ("they sage", "hey stage", etc.)
+- Lower `DAYTIME_RMS_GATE` in `sage.py` if Sage consistently misses you (default: 80)
 - Move the mic away from the Pi's fan if possible (USB extension cable helps)
-- Lower `OWW_THRESHOLD` in `sage.py` if Sage consistently misses you (try 0.75)
 
 **Whisper recognition is poor**
-- Fan noise is the most common issue with generic microphones — a USB extension cable for the mic helps significantly
+- Fan noise is the most common issue with generic microphones — a USB extension cable helps separate the mic from the fan
 - faster-whisper with the base.en model balances speed and accuracy on Pi 4
 - Sage calibrates a noise baseline before each recording to filter ambient noise
 
@@ -673,12 +656,9 @@ Soldering required to attach jumper wires to the LED ring pads (PWR, GND, DIN). 
 - A USB conference speakerphone like the **Jabra SPEAK 510** is also recommended — hardware AEC provides a second layer of echo cancellation
 - Sage auto-pauses Spotify when it detects the wake word, but the word must be heard first
 - With a single-mic setup and no AEC, keeping Spotify volume at 75% or lower helps
-- The OWW wake word threshold can be tuned in `sage.py` (`OWW_THRESHOLD`) — higher values (0.80–0.90) reduce false triggers from ambient noise
-
 **Too many false wake triggers (TV, ambient noise)**
-- Raise `OWW_THRESHOLD` in `sage.py` (default: 0.85, max useful: ~0.95)
-- Train a custom wake word model using your real environment's background noise — see Step 12
-- Sage requires both OWW and Vosk to confirm the wake word — this dual-check catches most TV dialogue false triggers
+- Raise `DAYTIME_RMS_GATE` in `sage.py` (default: 80) to require louder speech
+- Vosk's language model naturally filters most non-speech sounds
 
 **Service won't start**
 - Check logs: `journalctl -u sage -f`
@@ -690,7 +670,7 @@ Soldering required to attach jumper wires to the LED ring pads (PWR, GND, DIN). 
 
 - Voice is processed by [Vosk](https://alphacephei.com/vosk/) and [Faster Whisper](https://github.com/SYSTRAN/faster-whisper) running locally on the Pi
 - Text-to-speech is handled by [Piper](https://github.com/rhasspy/piper) running locally on the Pi
-- Wake word detection uses [openWakeWord](https://github.com/dscripka/openWakeWord) running locally
+- Wake word detection uses [Vosk](https://alphacephei.com/vosk/) running locally
 - No audio is ever sent to an external server or stored
 - Claude AI chat is **opt-in** — only activates when you say "Hey Claude" and requires your own API key
 - Internet is used only for: Spotify, weather (Open-Meteo), calendar (iCal), push notifications (ntfy), and Claude API

@@ -642,7 +642,7 @@ def play_alarm_loop(stop_event):
                 ap.stdin.close()
                 ap.wait()
             except BrokenPipeError:
-                print(f"OWW error: {_oww_err}", flush=True)
+                print(f"Error: {e}", flush=True)
             if not stop_event.is_set():
                 break
             # Request mic from main loop
@@ -813,9 +813,9 @@ bedtime_mode = threading.Event()  # when set, Sage is in do-not-disturb mode
 
 BEDTIME_VOLUME   = 9    # amixer numid=4 value at night
 DAYTIME_VOLUME   = 11   # amixer numid=4 value during the day (full)
-BEDTIME_RMS_GATE = 600  # rms_peak required to wake at night (more deliberate speech needed)
-DAYTIME_RMS_GATE = 110  # rms_peak required to wake during the day
-OWW_RMS_GATE     = DAYTIME_RMS_GATE  # current active gate — adjusted at bedtime/wake
+BEDTIME_RMS_GATE = 100  # rms_peak required to wake at night (more deliberate speech needed)
+DAYTIME_RMS_GATE = 80  # rms_peak required to wake during the day
+RMS_GATE     = DAYTIME_RMS_GATE  # current active gate — adjusted at bedtime/wake
 
 def _set_speaker_volume(level):
     """Set Jabra speaker volume via amixer (0–11)."""
@@ -828,20 +828,20 @@ def _set_speaker_volume(level):
 
 def enter_bedtime():
     """Enter bedtime mode — lower volume, raise wake gate, silence alarms, dim lights."""
-    global OWW_RMS_GATE
+    global RMS_GATE
     bedtime_mode.set()
     dismiss_alarms()
     _set_speaker_volume(BEDTIME_VOLUME)
-    OWW_RMS_GATE = BEDTIME_RMS_GATE
+    RMS_GATE = BEDTIME_RMS_GATE
     lights.set_state("off")
     print("Bedtime mode ON", flush=True)
 
 def exit_bedtime():
     """Exit bedtime mode — restore volume, lower wake gate, resume normal operation."""
-    global OWW_RMS_GATE
+    global RMS_GATE
     bedtime_mode.clear()
     _set_speaker_volume(DAYTIME_VOLUME)
-    OWW_RMS_GATE = DAYTIME_RMS_GATE
+    RMS_GATE = DAYTIME_RMS_GATE
     lights.set_state("idle")
     print("Bedtime mode OFF", flush=True)
 
@@ -879,8 +879,8 @@ def bedtime_scheduler():
                     weather_text = get_weather()
                     if weather_text:
                         speak(weather_text)
-                except Exception as _oww_err:
-                    print(f"OWW error: {_oww_err}", flush=True)
+                except Exception as e:
+                    print(f"Error: {e}", flush=True)
                 # Calendar briefing
                 try:
                     events = fetch_todays_events()
@@ -895,8 +895,8 @@ def bedtime_scheduler():
                         for e in events:
                             time_str = e["time"].strftime("%I:%M %p").lstrip("0")
                             speak(f"{e[summary]} at {time_str}.")
-                except Exception as _oww_err:
-                    print(f"OWW error: {_oww_err}", flush=True)
+                except Exception as e:
+                    print(f"Error: {e}", flush=True)
 
         time.sleep(30)
 
@@ -1015,8 +1015,8 @@ def update_checker():
     if _update_check_file.exists():
         try:
             last_check_date = date.fromisoformat(_update_check_file.read_text().strip())
-        except Exception as _oww_err:
-            print(f"OWW error: {_oww_err}", flush=True)
+        except Exception as e:
+            print(f"Error: {e}", flush=True)
     while True:
         now = datetime.now()
         today = now.date()
@@ -1058,7 +1058,7 @@ def update_checker():
                              if l and "Package" not in l and "---" not in l]
                 # Filter to packages we care about
                 sage_deps = ["vosk", "faster-whisper", "spotipy", "pyaudio",
-                             "openwakeword", "icalendar", "python-dateutil"]
+                             "icalendar", "python-dateutil"]
                 outdated = []
                 for line in pip_lines:
                     pkg = line.split()[0].lower() if line.split() else ""
@@ -1181,7 +1181,7 @@ def handle_command(text):
             try:
                 sp.pause_playback()
                 speak("Paused")
-            except Exception as _oww_err:
+            except Exception as e:
                 speak("Nothing to stop")
             return
         return
@@ -1631,8 +1631,8 @@ def handle_command(text):
                             sp.start_playback(device_id=dev)
                             speak("Resuming music")
                             return
-                    except Exception as _oww_err:
-                        print(f"OWW error: {_oww_err}", flush=True)
+                    except Exception as e:
+                        print(f"Error: {e}", flush=True)
                     # Nothing to resume — play liked songs on shuffle
                     try:
                         liked = sp.current_user_saved_tracks(limit=50)
@@ -1669,8 +1669,8 @@ def handle_command(text):
                 sp.start_playback(device_id=dev, uris=[track["uri"]])
                 try:
                     sp.volume(90, device_id=dev)
-                except Exception as _oww_err:
-                    print(f"OWW error: {_oww_err}", flush=True)
+                except Exception as e:
+                    print(f"Error: {e}", flush=True)
                 return
 
             # Try splitting query into artist + track (e.g. "tundra your name")
@@ -1686,8 +1686,8 @@ def handle_command(text):
                     sp.start_playback(device_id=dev, uris=[track["uri"]])
                     try:
                         sp.volume(90, device_id=dev)
-                    except Exception as _oww_err:
-                        print(f"OWW error: {_oww_err}", flush=True)
+                    except Exception as e:
+                        print(f"Error: {e}", flush=True)
                     return
 
             # Try artist
@@ -1698,8 +1698,8 @@ def handle_command(text):
                 sp.start_playback(device_id=dev, context_uri=artists[0]["uri"])
                 try:
                     sp.volume(90, device_id=dev)
-                except Exception as _oww_err:
-                    print(f"OWW error: {_oww_err}", flush=True)
+                except Exception as e:
+                    print(f"Error: {e}", flush=True)
                 return
 
             # Try playlist
@@ -1710,8 +1710,8 @@ def handle_command(text):
                 sp.start_playback(device_id=dev, context_uri=playlists[0]["uri"])
                 try:
                     sp.volume(90, device_id=dev)
-                except Exception as _oww_err:
-                    print(f"OWW error: {_oww_err}", flush=True)
+                except Exception as e:
+                    print(f"Error: {e}", flush=True)
                 return
 
             speak(f"I couldn't find {query} on Spotify")
@@ -1727,8 +1727,8 @@ def handle_command(text):
                         sp.start_playback(device_id=dev)
                         speak("Had a hiccup, but music should be playing now.")
                         return
-                except Exception as _oww_err:
-                    print(f"OWW error: {_oww_err}", flush=True)
+                except Exception as e:
+                    print(f"Error: {e}", flush=True)
                 speak("Spotify connection dropped. Try again in a moment.")
             elif "No active device" in str(e) or "404" in str(e):
                 speak("I can't find the speaker right now. Try again in a moment.")
@@ -1877,18 +1877,33 @@ def handle_command(text):
                 disk_parts = disk_lines[1].split()
                 disk_used_pct = disk_parts[4]
 
+            # CPU usage
+            cpu_pct = int(os.popen("top -bn1 | grep 'Cpu(s)' | awk '{print \$2}'").read().strip() or 0)
+
             report = (
                 f"System uptime: {uptime_str}. "
+                f"CPU usage: {cpu_pct} percent. "
                 f"CPU temperature: {temp}. "
                 f"Memory: {mem_pct} percent used. "
                 f"Disk: {disk_used_pct} used. "
                 f"Firewall: {fw_status}. "
                 f"{timer_count} active timers."
             )
-            speak(report)
+            speak(report + " Is there anything else I can help with?")
         except Exception as e:
             print(f"Status error: {e}", flush=True)
             speak("I could not get the full system status.")
+            return
+        # Active listening for follow-up command
+        followup = whisper_listen(max_seconds=5, silent=True, sensitivity=1.2)
+        if followup and followup.strip() and "[blank" not in followup.lower():
+            followup_lower = followup.lower().strip()
+            if any(w in followup_lower for w in ["no", "nope", "that is all",
+                                                   "never mind", "nevermind",
+                                                   "all good", "thank you", "thanks", "no thanks"]):
+                speak("Okay!")
+                return
+            handle_command(followup)
         return
 
     # Light controls
@@ -1926,7 +1941,7 @@ def handle_command(text):
                     speak("Yep, firewall is up and running.")
                 else:
                     speak("Heads up, the firewall is not running.")
-        except Exception as _oww_err:
+        except Exception as e:
             speak("I could not manage the firewall.")
         return
 
@@ -1979,7 +1994,6 @@ VOSK_RATE = 16000    # what the Vosk model expects
 model = Model("/home/sage/vosk-model-en-us-0.22-lgraph")
 
 # Initialize wake word audio buffer
-oww_audio_buffer = np.zeros(32000, dtype=np.int16)
 
 
 
@@ -1995,29 +2009,7 @@ except Exception as e:
 
 rec = KaldiRecognizer(model, VOSK_RATE)
 
-# Load openWakeWord feature extractor (shared by both models)
-oww_features = None
-try:
-    from openwakeword.utils import AudioFeatures
-    oww_features = AudioFeatures()
-    print("OWW audio features ready", flush=True)
-except Exception as e:
-    print(f"OWW features not loaded: {e}", flush=True)
-
-# Load hey_sage wake word model
-oww_session = None
-oww_input_name = None
-OWW_THRESHOLD = 0.80  # lowered to catch wake word from ~12 feet away
-try:
-    import onnxruntime as _ort
-    oww_session = _ort.InferenceSession("/home/sage/hey_sage.onnx")
-    oww_input_name = oww_session.get_inputs()[0].name
-    print("Wake word model ready (hey sage)", flush=True)
-except Exception as e:
-    print(f"hey_sage model not loaded: {e}", flush=True)
-
-# Claude wake word is detected via Vosk only — OWW model is not used
-oww_claude_session = None
+# Wake word detection handled by Vosk only
 
 # Suppress Jack/Pulse stderr during PyAudio init
 _devnull = os.open(os.devnull, os.O_WRONLY)
@@ -2072,7 +2064,7 @@ WAKE_WORDS = [
 # ── Claude conversation mode — entered via command after Sage wakes ───────────
 def enter_claude_mode():
     """Start a Claude conversation. Closes and reopens the mic stream internally."""
-    global stream, rec, oww_audio_buffer
+    global stream, rec
     speak(random.choice([
         "Sure, let me get Claude. One moment.",
         "Sure thing, pulling up Claude now.",
@@ -2127,8 +2119,8 @@ def enter_claude_mode():
                     _pb = sp.current_playback() if sp else None
                     if _pb and not _pb.get("is_playing"):
                         sp.start_playback()
-            except Exception as _oww_err:
-                print(f"OWW error: {_oww_err}", flush=True)
+            except Exception as e:
+                print(f"Error: {e}", flush=True)
             lights.set_state("idle")
             break
         # Ask Claude
@@ -2147,7 +2139,6 @@ def enter_claude_mode():
     stream = p.open(format=pyaudio.paInt16, channels=1, rate=MIC_RATE,
                     input=True, input_device_index=MIC_DEVICE_INDEX, frames_per_buffer=8192)
     rec.Reset()
-    oww_audio_buffer = np.zeros(32000, dtype=np.int16)
     whisper_listen._rms_window = []
 
 
@@ -2171,7 +2162,7 @@ if _is_bedtime_now():
     enter_bedtime()  # sets volume + rms gate silently, no announcement
 
 # First boot ever = "Sage is ready", subsequent restarts = "Sage is back online"
-# Speak BEFORE opening mic stream so "sage" in the greeting doesn't trigger OWW
+# Speak BEFORE opening mic stream so "sage" in the greeting doesn't re-trigger wake word
 _boot_marker = Path.home() / ".sage_has_booted"
 if _boot_marker.exists():
     speak("Sage is back online")
@@ -2216,104 +2207,22 @@ while True:
     if alarm_playing.is_set():
         try:
             data_raw = stream.read(4096, exception_on_overflow=False)  # drain buffer
-        except Exception as _oww_err:
-            print(f"OWW error: {_oww_err}", flush=True)
+        except Exception as e:
+            print(f"Error: {e}", flush=True)
         continue
 
     data_raw = stream.read(4096, exception_on_overflow=False)
     rms = audioop.rms(data_raw, 2)
-    # Rolling peak rms over last 10 chunks (~2.5s) — OWW buffer spans same window
+    # Rolling peak rms over last 10 chunks (~2.5s) — for wake word detection
     if not hasattr(whisper_listen, '_rms_window'):
         whisper_listen._rms_window = []
     whisper_listen._rms_window.append(rms)
     if len(whisper_listen._rms_window) > 10:
         whisper_listen._rms_window.pop(0)
     rms_peak = max(whisper_listen._rms_window)
-    # Downsample to 16k for both Vosk and OWW
-    data16k_bytes = audioop.ratecv(data_raw, 2, 1, MIC_RATE, 16000, None)[0]
-    data = audioop.ratecv(data_raw, 2, 1, MIC_RATE, VOSK_RATE, None)[0]
+    data = data_raw  # MIC_RATE == VOSK_RATE, no conversion needed
 
-    # ── OWW: update rolling buffer and check every ~1s (every 11 chunks) ──────
-    chunk_16k = np.frombuffer(data16k_bytes, dtype=np.int16)
-    oww_audio_buffer = np.roll(oww_audio_buffer, -len(chunk_16k))
-    oww_audio_buffer[-len(chunk_16k):] = chunk_16k[:len(oww_audio_buffer)]
-
-    # OWW: only True in the iteration OWW actually scores above threshold
-    oww_detected = False
-    if not hasattr(whisper_listen, '_oww_counter'):
-        whisper_listen._oww_counter = 0
-    whisper_listen._oww_counter += 1
-    if whisper_listen._oww_counter >= 5 and oww_features and oww_session:
-        whisper_listen._oww_counter = 0
-        try:
-            embeddings = oww_features.embed_clips(oww_audio_buffer.reshape(1, -1), batch_size=1)
-            emb_flat = np.array(embeddings).reshape(1, -1).astype(np.float32)
-            oww_result = oww_session.run(None, {oww_input_name: emb_flat}); oww_score = oww_result[1][0][1] if len(oww_result) > 1 else oww_result[0][0][0]
-            if oww_score > OWW_THRESHOLD or oww_score > 0.5:
-                print(f"Hey Sage OWW score: {oww_score:.3f} rms_peak:{rms_peak}{'  *** TRIGGERED ***' if oww_score > OWW_THRESHOLD else ''}", flush=True)
-            if oww_score > OWW_THRESHOLD:
-                oww_detected = True
-                whisper_listen._oww_last_trigger = time.time()
-                oww_audio_buffer = np.zeros(32000, dtype=np.int16)
-        except Exception as _oww_err:
-            print(f"OWW error: {_oww_err}", flush=True)
-
-    # ── Sage OWW primary trigger — fires immediately without waiting for Vosk ─
-    if oww_detected and rms_peak > OWW_RMS_GATE:
-        print(f"OWW primary trigger: {oww_score:.3f} rms_peak:{rms_peak}", flush=True)
-        lights.set_state("wake")
-        stream.stop_stream()
-        stream.close()
-        greeting = random.choice([
-            "Sage here, how can I assist?",
-            "Sage here, what can I do for you?",
-            "It's Sage, go ahead.",
-            "Sage here, what's up?",
-            "This is Sage, I'm listening.",
-        ])
-        command = whisper_listen(spoken_prompt=greeting)
-        start_timer._cmd_time = time.time()  # capture for timer compensation
-        _dismiss_words = ("never mind", "nevermind", "cancel", "nothing",
-                          "forget it", "false alarm", "sorry", "no", "nope",
-                          "go away", "stop listening", "dismiss")
-        if command and any(d in command.lower() for d in _dismiss_words):
-            speak(random.choice(["No worries.", "Alright.", "Standing by."]))
-        elif command and (any(p in command.lower() for p in CLAUDE_INVOKE_PHRASES) or any(n in command.lower() for n in CLAUDE_NAME_VARIANTS)):
-            if claude_client:
-                enter_claude_mode()
-                continue  # stream already reopened inside enter_claude_mode
-            else:
-                speak("Claude isn't available right now.")
-        elif command:
-            handle_command(command)
-            lights.set_state("success")
-        else:
-            play_error_chime()  # ugly buzzy chime = didn't catch anything, going idle
-        try:
-            if getattr(whisper_listen, "_spotify_was_playing", False):
-                whisper_listen._spotify_was_playing = False
-                _pb = sp.current_playback() if sp else None
-                if _pb and not _pb.get("is_playing"):
-                    sp.start_playback()
-        except Exception as _oww_err:
-            print(f"OWW error: {_oww_err}", flush=True)
-        lights.set_state("idle")
-        stream = p.open(
-            format=pyaudio.paInt16,
-            channels=1,
-            rate=MIC_RATE,
-            input=True,
-            input_device_index=MIC_DEVICE_INDEX,
-            frames_per_buffer=8192
-        )
-        rec.Reset()
-        oww_audio_buffer = np.zeros(32000, dtype=np.int16)
-        whisper_listen._oww_last_trigger = 0
-        whisper_listen._rms_window = []  # clear stale rms_peak after recording session
-        continue
-
-    # ── Vosk: fallback utterance detection ────────────────────────────────────
-    text = ""
+    
     vosk_detected = False
     if not hasattr(whisper_listen, '_vosk_last_trigger'):
         whisper_listen._vosk_last_trigger = 0
@@ -2328,8 +2237,8 @@ while True:
             whisper_listen._vosk_last_trigger = time.time()
 
 
-    # Vosk fallback — only reached if OWW didn't fire, requires minimum energy
-    _wake_confirmed = vosk_detected and rms_peak > OWW_RMS_GATE
+    # Vosk wake word detection — requires minimum energy
+    _wake_confirmed = vosk_detected and rms_peak > RMS_GATE
     if _wake_confirmed:
         source = f"Vosk: {text}"
         print(f"Wake word detected! ({source})")
@@ -2370,8 +2279,8 @@ while True:
                 _pb = sp.current_playback() if sp else None
                 if _pb and not _pb.get("is_playing"):
                     sp.start_playback()
-        except Exception as _oww_err:
-            print(f"OWW error: {_oww_err}", flush=True)
+        except Exception as e:
+            print(f"Error: {e}", flush=True)
         lights.set_state("idle")
         # Reopen the mic stream for Vosk wake word detection
         stream = p.open(
