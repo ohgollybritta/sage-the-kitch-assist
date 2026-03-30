@@ -1,4 +1,4 @@
-# Sage v1.4.5 🌿
+# Sage v1.4.8 🌿
 ### A privacy-first voice assistant for your kitchen, built on a Raspberry Pi.
 
 Sage is an open-source voice assistant that does the everyday things a kitchen assistant should do — set timers, give weather reports, manage reminders, chat with Claude AI — without sending your voice to the cloud. The voice pipeline runs entirely on a Raspberry Pi.
@@ -109,6 +109,13 @@ A **USB conference speakerphone** like the **Jabra SPEAK 510** is optional but h
 - 🗣️ **Self-identification on wake** — Sage and Claude both announce who they are when activated (e.g. "Sage here, what's up?" / "Claude here, what's your question?") so you always know who you're talking to
 - ❌ **Dismiss on false wake** — say "nevermind", "cancel", "nothing", "forget it", or "nope" after a false trigger and Sage stands down gracefully
 
+### Safety
+- 🌡️ **Temperature monitoring** — checks CPU temp every 30 seconds
+- 🌡️ **Fan control** — fan on GPIO 14 activates at 60°C, off at 55°C
+- ⚠️ **Warm warning** — speaks and sends notification at 75°C
+- 🔥 **Critical warning** — speaks and sends notification at 82°C
+- 🚨 **Emergency shutdown** — automatic shutdown at 83°C to protect hardware
+
 ### Visual Indicators (LED ring)
 - 🟢 **Green** — Sage is idle/listening
 - 🔵 **Blue pulse** — wake word detected
@@ -195,7 +202,7 @@ if [ -z "$CARD" ]; then
 fi
 cat > /etc/raspotify/conf << CONF
 LIBRESPOT_NAME="Sage"
-LIBRESPOT_DEVICE="plughw:${CARD},0"
+LIBRESPOT_BACKEND="pulseaudio"
 CONF
 EOF
 sudo chmod +x /usr/local/bin/setup-raspotify.sh
@@ -223,6 +230,26 @@ EOF
 sudo systemctl daemon-reload
 sudo systemctl enable setup-raspotify.service
 ```
+
+#### PulseAudio override for Raspotify
+
+Raspotify runs as root by default, which can't access the user's PulseAudio session. Create a systemd override so it runs as the `sage` user with PulseAudio access:
+
+```bash
+sudo mkdir -p /etc/systemd/system/raspotify.service.d
+sudo tee /etc/systemd/system/raspotify.service.d/override.conf << EOF
+[Service]
+User=sage
+Group=sage
+Environment=PULSE_SERVER=unix:/run/user/1000/pulse/native
+ProtectHome=false
+PrivateUsers=false
+EOF
+sudo systemctl daemon-reload
+sudo systemctl restart raspotify
+```
+
+This allows Sage's TTS and Spotify to share the same speaker through PulseAudio without device-busy conflicts.
 
 #### Open firewall for Spotify Connect
 
@@ -472,57 +499,23 @@ sudo ufw --force enable
 
 ### 12. Train your wake word (recommended)
 
-The included `hey_sage.onnx` model is a starting point, but **training on your own voices in your actual environment dramatically reduces false triggers** — especially in noisy homes with TVs, running water, and multiple people.
+The included `hey_sage.onnx` model is trained entirely from synthetic TTS voices using Piper — no real recordings needed. It works out of the box, but **training on your own voices in your actual environment can further reduce false triggers**.
 
-Sage includes a full custom training pipeline (`train_hey_sage.py`) that combines your real recordings with piper synthetic voices across multiple voice styles.
+#### Synthetic training (default — runs on Mac or any desktop)
 
-#### Step 1 — Install training dependencies
+The default model was trained using 5 diverse Piper TTS voices (male, female, US, UK accents) with varied speed and noise scales:
+- **300 positive clips** — "hey sage" across all voice/speed/noise combinations
+- **600 negative clips** — 20 non-wake-word phrases ("hey there", "hey page", "okay google", etc.)
+- Embeddings extracted via openWakeWord's AudioFeatures
+- Classifier: sklearn MLPClassifier (64→32 hidden layers), exported to ONNX via skl2onnx
+- Validation accuracy: ~100%, positive avg score: 0.88, negative avg score: 0.02
 
-```bash
-pip3 install torch --index-url https://download.pytorch.org/whl/cpu --break-system-packages
-pip3 install torchaudio --index-url https://download.pytorch.org/whl/cpu --break-system-packages
-pip3 install torchinfo torchmetrics torch-audiomentations pronouncing speechbrain --break-system-packages
-git clone https://github.com/rhasspy/piper-sample-generator.git
-pip3 install ./piper-sample-generator --break-system-packages
-```
+Training on a Mac takes ~5 minutes. On a Pi 4, expect 30–60 minutes.
 
-#### Step 2 — Record positive samples (one person at a time)
-
-Run this with your **background noise on** — TV at normal volume, kitchen sounds, whatever is typical in your home. The model needs to learn your voices **over** that noise, not in silence.
+#### Deploy
 
 ```bash
-/home/sage/record_samples.sh positive
-```
-
-- Press Enter to record each 2-second clip — say **"Hey Sage"** naturally
-- Aim for **50 clips per voice** — vary tone, speed, volume, and distance
-- Run again for each person in your household
-
-#### Step 3 — Record negative samples
-
-Keep the background noise on. Record ambient sound **without** saying "Hey Sage":
-
-```bash
-/home/sage/record_samples.sh negative
-```
-
-Let it capture: TV dialogue, normal conversation, kitchen sounds, music, running water. Aim for 50+ clips. This is what teaches the model what **not** to trigger on.
-
-> **Why noise-on for both?** The model learns the *contrast* between your voice saying "Hey Sage" and the ambient noise. If you record positives with noise but negatives in silence (or vice versa), the model may learn the background rather than your voice.
-
-#### Step 4 — Run training
-
-```bash
-nohup python3 /home/sage/train_hey_sage.py > /home/sage/wake_word_training/training.log 2>&1 &
-tail -f /home/sage/wake_word_training/training.log
-```
-
-Training generates synthetic positive samples using piper TTS (across all installed voices), augments all clips with noise and speed variation, extracts openWakeWord embeddings, and trains a DNN classifier for 200 epochs. On a Pi 4, expect 30–60 minutes.
-
-#### Step 5 — Deploy
-
-```bash
-cp /home/sage/wake_word_training/output/hey_sage.onnx /home/sage/hey_sage.onnx
+scp hey_sage.onnx sage@sage.local:~/hey_sage.onnx
 sudo systemctl restart sage
 ```
 
@@ -628,9 +621,11 @@ If using a WS2812B LED ring (24-bit recommended):
 |---|---|
 | 5V | Pin 2 or 4 |
 | GND | Pin 6 |
-| DIN | Pin 12 (GPIO 18) |
+| DIN | Pin 19 (GPIO 10 / SPI) |
 
-No soldering required — use female-to-female jumper wires.
+Soldering required to attach jumper wires to the LED ring pads (PWR, GND, DIN). Use female-to-female jumper wires from the ring to the Pi GPIO header.
+
+> **Note:** GPIO 18 (PWM) conflicts with the Pi's onboard audio driver (`snd_bcm2835`). GPIO 10 (SPI) avoids this conflict. SPI must be enabled: `sudo raspi-config nonint do_spi 0`.
 
 ---
 
@@ -699,7 +694,7 @@ No soldering required — use female-to-female jumper wires.
 - No audio is ever sent to an external server or stored
 - Claude AI chat is **opt-in** — only activates when you say "Hey Claude" and requires your own API key
 - Internet is used only for: Spotify, weather (Open-Meteo), calendar (iCal), push notifications (ntfy), and Claude API
-- All personal config, credentials, and voice profiles are gitignored
+
 
 ---
 

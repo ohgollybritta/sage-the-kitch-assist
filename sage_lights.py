@@ -151,3 +151,5 @@ class SageLights:
 
 # Singleton instance
 lights = SageLights()
+
+# Built by Britta Seisums Davis / ohgollybritta

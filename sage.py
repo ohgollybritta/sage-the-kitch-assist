@@ -84,15 +84,24 @@ def ask_claude(question):
         return "Sorry, I couldn't reach Claude right now."
 
 # ── Personal config (presets, reminders) ─────────────────────────────────────
-SAGE_CONFIG = {"preset_timers": {}, "scheduled_reminders": []}
+SAGE_CONFIG = {"preset_timers": {}, "scheduled_reminders": [], "date_reminders": []}
 config_path = Path.home() / ".sage_config.json"
 if config_path.exists():
     with open(config_path) as f:
         SAGE_CONFIG.update(json.load(f))
     print(f"Loaded {len(SAGE_CONFIG['preset_timers'])} preset timers, "
-          f"{len(SAGE_CONFIG['scheduled_reminders'])} scheduled reminders")
+          f"{len(SAGE_CONFIG['scheduled_reminders'])} scheduled reminders, "
+          f"{len(SAGE_CONFIG.get('date_reminders', []))} date reminders")
 else:
     print("No ~/.sage_config.json found — running without presets/reminders")
+
+def save_config():
+    """Persist SAGE_CONFIG to disk."""
+    try:
+        with open(config_path, "w") as f:
+            json.dump(SAGE_CONFIG, f, indent=2)
+    except Exception as e:
+        print(f"Failed to save config: {e}", flush=True)
 
 # ── Push notifications (ntfy) ────────────────────────────────────────────────
 NTFY_URL = SAGE_CONFIG.get("ntfy_url", "http://localhost:8080")
@@ -450,7 +459,7 @@ def play_thinking_chime():
     _play_raw(s)
 
 # ── Whisper command listener ─────────────────────────────────────────────────
-def whisper_listen(max_seconds=6.5, spoken_prompt=None):
+def whisper_listen(max_seconds=6.5, spoken_prompt=None, silent=False, sensitivity=1.8):
     """Play chime, record with silence detection, then transcribe with Faster Whisper."""
     import wave
     wav_path = "/tmp/sage_cmd.wav"
@@ -470,9 +479,10 @@ def whisper_listen(max_seconds=6.5, spoken_prompt=None):
 
     time.sleep(0.2)
     if spoken_prompt:
-        play_chime()
+        if not silent:
+            play_chime()
         speak(spoken_prompt)
-    else:
+    elif not silent:
         play_chime()
     lights.set_state("listening")
 
@@ -502,7 +512,7 @@ def whisper_listen(max_seconds=6.5, spoken_prompt=None):
         chunk_count += 1
 
     baseline = sum(baseline_energies) / max(len(baseline_energies), 1)
-    threshold = baseline * 1.8  # speech must be 80% louder than fan
+    threshold = baseline * sensitivity  # adjustable speech detection sensitivity
 
     for _ in range(max_chunks - chunk_count):
         data = rec_proc.stdout.read(chunk_size * 2)
@@ -632,7 +642,7 @@ def play_alarm_loop(stop_event):
                 ap.stdin.close()
                 ap.wait()
             except BrokenPipeError:
-                pass
+                print(f"OWW error: {_oww_err}", flush=True)
             if not stop_event.is_set():
                 break
             # Request mic from main loop
@@ -804,7 +814,7 @@ bedtime_mode = threading.Event()  # when set, Sage is in do-not-disturb mode
 BEDTIME_VOLUME   = 9    # amixer numid=4 value at night
 DAYTIME_VOLUME   = 11   # amixer numid=4 value during the day (full)
 BEDTIME_RMS_GATE = 600  # rms_peak required to wake at night (more deliberate speech needed)
-DAYTIME_RMS_GATE = 600  # rms_peak required to wake during the day
+DAYTIME_RMS_GATE = 110  # rms_peak required to wake during the day
 OWW_RMS_GATE     = DAYTIME_RMS_GATE  # current active gate — adjusted at bedtime/wake
 
 def _set_speaker_volume(level):
@@ -869,8 +879,8 @@ def bedtime_scheduler():
                     weather_text = get_weather()
                     if weather_text:
                         speak(weather_text)
-                except Exception:
-                    pass
+                except Exception as _oww_err:
+                    print(f"OWW error: {_oww_err}", flush=True)
                 # Calendar briefing
                 try:
                     events = fetch_todays_events()
@@ -885,8 +895,8 @@ def bedtime_scheduler():
                         for e in events:
                             time_str = e["time"].strftime("%I:%M %p").lstrip("0")
                             speak(f"{e[summary]} at {time_str}.")
-                except Exception:
-                    pass
+                except Exception as _oww_err:
+                    print(f"OWW error: {_oww_err}", flush=True)
 
         time.sleep(30)
 
@@ -918,6 +928,27 @@ def reminder_scheduler():
         for key in list(fired_today.keys()):
             if key[1] != today_key:
                 del fired_today[key]
+
+        # ── Date-based reminders (one-time, fire at 9am on target date) ──
+        date_reminders = SAGE_CONFIG.get("date_reminders", [])
+        to_remove = []
+        for i, dr in enumerate(date_reminders):
+            fire_key = ("date_" + dr["message"], dr["date"])
+            if fire_key in fired_today:
+                continue
+            if today_key == dr["date"] and now.hour == 9 and now.minute < 1:
+                fired_today[fire_key] = True
+                msg = f"Reminder: {dr['message']}"
+                print(f"DATE REMINDER: {msg}", flush=True)
+                send_notification(msg, title="Reminder")
+                speak(msg)
+                to_remove.append(i)
+        if to_remove:
+            for i in sorted(to_remove, reverse=True):
+                date_reminders.pop(i)
+            SAGE_CONFIG["date_reminders"] = date_reminders
+            save_config()
+
         time.sleep(30)
 
 # ── Security monitor ──────────────────────────────────────────────────────────
@@ -984,8 +1015,8 @@ def update_checker():
     if _update_check_file.exists():
         try:
             last_check_date = date.fromisoformat(_update_check_file.read_text().strip())
-        except Exception:
-            pass
+        except Exception as _oww_err:
+            print(f"OWW error: {_oww_err}", flush=True)
     while True:
         now = datetime.now()
         today = now.date()
@@ -1091,6 +1122,13 @@ def temp_monitor():
                 _set_fan(True)
             elif temp_c <= FAN_OFF_TEMP and _fan_on:
                 _set_fan(False)
+            if temp_c >= 83:
+                msg = "Emergency! I'm at " + str(int(temp_c)) + " degrees. Shutting down to protect myself."
+                speak(msg)
+                send_notification(f"🚨 CPU at {temp_c:.0f}°C — emergency shutdown!", title="Sage Emergency", force=True)
+                time.sleep(5)
+                os.system("sudo shutdown now")
+                return
             if temp_c >= 82:
                 msg = f"Critical: I'm running at {temp_c:.0f}°C and may slow down or shut off. Please move me somewhere cooler or check my ventilation."
                 speak(msg)
@@ -1143,7 +1181,7 @@ def handle_command(text):
             try:
                 sp.pause_playback()
                 speak("Paused")
-            except Exception:
+            except Exception as _oww_err:
                 speak("Nothing to stop")
             return
         return
@@ -1191,6 +1229,46 @@ def handle_command(text):
 
     # Voice-triggered reminders
     if "remind" in text:
+        # Parse date-based: "remind me to cancel Netflix before April 15th"
+        #                   "remind me to renew license by march 30"
+        #                   "remind me to call mom on june 1st"
+        MONTHS = {"january": 1, "february": 2, "march": 3, "april": 4,
+                  "may": 5, "june": 6, "july": 7, "august": 8,
+                  "september": 9, "october": 10, "november": 11, "december": 12}
+        date_match = re.search(
+            r"remind\s+(?:me\s+)?(?:to\s+)?(.+?)\s+(?:before|by|on)\s+"
+            r"(january|february|march|april|may|june|july|august|september|october|november|december)"
+            r"\s+(\d{1,2})(?:st|nd|rd|th)?",
+            text, re.IGNORECASE)
+        if date_match:
+            task = date_match.group(1).strip()
+            month_name = date_match.group(2).lower()
+            day = int(date_match.group(3))
+            month = MONTHS[month_name]
+            now = datetime.now()
+            year = now.year
+            from datetime import date as _date
+            try:
+                target = _date(year, month, day)
+            except ValueError:
+                speak("That doesn't seem like a valid date.")
+                return
+            # If "before", fire the day before
+            if "before" in text.lower().split("remind")[1]:
+                target = target - timedelta(days=1)
+            # If the date has already passed this year, bump to next year
+            if target < now.date():
+                target = target.replace(year=year + 1)
+            date_str = target.strftime("%B %d, %Y").replace(" 0", " ")
+            dr = {"message": task, "date": target.isoformat()}
+            SAGE_CONFIG.setdefault("date_reminders", []).append(dr)
+            save_config()
+            if "before" in text.lower().split("remind")[1]:
+                speak(f"Got it. I'll remind you to {task} on {date_str}, the day before.")
+            else:
+                speak(f"Got it. I'll remind you to {task} on {date_str}.")
+            return
+
         # Parse time of day: "remind me to X at 5:30" or "at 5:30pm"
         at_match = re.search(r"remind\s+(?:me\s+)?(?:to\s+)?(.+?)\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?|am|pm)?", text)
         if at_match:
@@ -1317,7 +1395,19 @@ def handle_command(text):
             time_str = f"{hour} oh {minute} {ampm}"
         else:
             time_str = f"{hour} {minute} {ampm}"
-        speak(f"It's {time_str}")
+        speak(f"It's {time_str}. Is there anything else I can help with?")
+        # Active listening for follow-up command
+        followup = whisper_listen(max_seconds=5, silent=True, sensitivity=1.2)
+        if followup and followup.strip() and "[blank" not in followup.lower():
+            followup_lower = followup.lower().strip()
+            # Dismiss phrases - just return to idle
+            if any(w in followup_lower for w in ["no", "nope", "that is all",
+                                                   "never mind", "nevermind",
+                                                   "all good", "thank you", "thanks", "no thanks"]):
+                speak("Okay!")
+                return
+            # Otherwise treat as a new command
+            handle_command(followup)
         return
 
     if "what day" in text or "what date" in text or "the date" in text or "today's date" in text:
@@ -1541,8 +1631,8 @@ def handle_command(text):
                             sp.start_playback(device_id=dev)
                             speak("Resuming music")
                             return
-                    except Exception:
-                        pass
+                    except Exception as _oww_err:
+                        print(f"OWW error: {_oww_err}", flush=True)
                     # Nothing to resume — play liked songs on shuffle
                     try:
                         liked = sp.current_user_saved_tracks(limit=50)
@@ -1579,8 +1669,8 @@ def handle_command(text):
                 sp.start_playback(device_id=dev, uris=[track["uri"]])
                 try:
                     sp.volume(90, device_id=dev)
-                except Exception:
-                    pass
+                except Exception as _oww_err:
+                    print(f"OWW error: {_oww_err}", flush=True)
                 return
 
             # Try splitting query into artist + track (e.g. "tundra your name")
@@ -1596,8 +1686,8 @@ def handle_command(text):
                     sp.start_playback(device_id=dev, uris=[track["uri"]])
                     try:
                         sp.volume(90, device_id=dev)
-                    except Exception:
-                        pass
+                    except Exception as _oww_err:
+                        print(f"OWW error: {_oww_err}", flush=True)
                     return
 
             # Try artist
@@ -1608,8 +1698,8 @@ def handle_command(text):
                 sp.start_playback(device_id=dev, context_uri=artists[0]["uri"])
                 try:
                     sp.volume(90, device_id=dev)
-                except Exception:
-                    pass
+                except Exception as _oww_err:
+                    print(f"OWW error: {_oww_err}", flush=True)
                 return
 
             # Try playlist
@@ -1620,8 +1710,8 @@ def handle_command(text):
                 sp.start_playback(device_id=dev, context_uri=playlists[0]["uri"])
                 try:
                     sp.volume(90, device_id=dev)
-                except Exception:
-                    pass
+                except Exception as _oww_err:
+                    print(f"OWW error: {_oww_err}", flush=True)
                 return
 
             speak(f"I couldn't find {query} on Spotify")
@@ -1637,8 +1727,8 @@ def handle_command(text):
                         sp.start_playback(device_id=dev)
                         speak("Had a hiccup, but music should be playing now.")
                         return
-                except Exception:
-                    pass
+                except Exception as _oww_err:
+                    print(f"OWW error: {_oww_err}", flush=True)
                 speak("Spotify connection dropped. Try again in a moment.")
             elif "No active device" in str(e) or "404" in str(e):
                 speak("I can't find the speaker right now. Try again in a moment.")
@@ -1836,7 +1926,7 @@ def handle_command(text):
                     speak("Yep, firewall is up and running.")
                 else:
                     speak("Heads up, the firewall is not running.")
-        except Exception:
+        except Exception as _oww_err:
             speak("I could not manage the firewall.")
         return
 
@@ -1917,7 +2007,7 @@ except Exception as e:
 # Load hey_sage wake word model
 oww_session = None
 oww_input_name = None
-OWW_THRESHOLD = 0.85  # lowered to catch wake word from ~12 feet away
+OWW_THRESHOLD = 0.80  # lowered to catch wake word from ~12 feet away
 try:
     import onnxruntime as _ort
     oww_session = _ort.InferenceSession("/home/sage/hey_sage.onnx")
@@ -2037,8 +2127,8 @@ def enter_claude_mode():
                     _pb = sp.current_playback() if sp else None
                     if _pb and not _pb.get("is_playing"):
                         sp.start_playback()
-            except Exception:
-                pass
+            except Exception as _oww_err:
+                print(f"OWW error: {_oww_err}", flush=True)
             lights.set_state("idle")
             break
         # Ask Claude
@@ -2126,8 +2216,8 @@ while True:
     if alarm_playing.is_set():
         try:
             data_raw = stream.read(4096, exception_on_overflow=False)  # drain buffer
-        except Exception:
-            pass
+        except Exception as _oww_err:
+            print(f"OWW error: {_oww_err}", flush=True)
         continue
 
     data_raw = stream.read(4096, exception_on_overflow=False)
@@ -2158,15 +2248,15 @@ while True:
         try:
             embeddings = oww_features.embed_clips(oww_audio_buffer.reshape(1, -1), batch_size=1)
             emb_flat = np.array(embeddings).reshape(1, -1).astype(np.float32)
-            oww_score = oww_session.run(None, {oww_input_name: emb_flat})[0][0][0]
+            oww_result = oww_session.run(None, {oww_input_name: emb_flat}); oww_score = oww_result[1][0][1] if len(oww_result) > 1 else oww_result[0][0][0]
             if oww_score > OWW_THRESHOLD or oww_score > 0.5:
                 print(f"Hey Sage OWW score: {oww_score:.3f} rms_peak:{rms_peak}{'  *** TRIGGERED ***' if oww_score > OWW_THRESHOLD else ''}", flush=True)
             if oww_score > OWW_THRESHOLD:
                 oww_detected = True
                 whisper_listen._oww_last_trigger = time.time()
                 oww_audio_buffer = np.zeros(32000, dtype=np.int16)
-        except Exception:
-            pass
+        except Exception as _oww_err:
+            print(f"OWW error: {_oww_err}", flush=True)
 
     # ── Sage OWW primary trigger — fires immediately without waiting for Vosk ─
     if oww_detected and rms_peak > OWW_RMS_GATE:
@@ -2205,8 +2295,8 @@ while True:
                 _pb = sp.current_playback() if sp else None
                 if _pb and not _pb.get("is_playing"):
                     sp.start_playback()
-        except Exception:
-            pass
+        except Exception as _oww_err:
+            print(f"OWW error: {_oww_err}", flush=True)
         lights.set_state("idle")
         stream = p.open(
             format=pyaudio.paInt16,
@@ -2280,8 +2370,8 @@ while True:
                 _pb = sp.current_playback() if sp else None
                 if _pb and not _pb.get("is_playing"):
                     sp.start_playback()
-        except Exception:
-            pass
+        except Exception as _oww_err:
+            print(f"OWW error: {_oww_err}", flush=True)
         lights.set_state("idle")
         # Reopen the mic stream for Vosk wake word detection
         stream = p.open(
