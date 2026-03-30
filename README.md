@@ -21,7 +21,7 @@ Sage is that alternative. The voice pipeline runs locally. Audio is never stored
 - **USB microphone** — any USB mic works out of the box
 - **USB speaker** — any USB speaker works out of the box
 - **WS2812B LED ring** (optional — 24-bit, for visual indicators)
-- **Female-to-female jumper wires** (3 needed for LED ring)
+- **Female-to-male jumper wires** (3 needed — red, black, green — for LED ring)
 
 ### Recommended: USB speakerphone (optional upgrade)
 
@@ -110,7 +110,7 @@ A **USB conference speakerphone** like the **Jabra SPEAK 510** is optional but h
 - ❌ **Dismiss on false wake** — say "nevermind", "cancel", "nothing", "forget it", or "nope" after a false trigger and Sage stands down gracefully
 
 ### Safety
-- 🌡️ **Temperature monitoring** — checks CPU temp every 30 seconds
+- 🌡️ **Temperature monitoring** — checks CPU temp every 3 minutes
 - 🌡️ **Fan control** — fan on GPIO 14 activates at 60°C, off at 55°C
 - ⚠️ **Warm warning** — speaks and sends notification at 75°C
 - 🔥 **Critical warning** — speaks and sends notification at 82°C
@@ -623,7 +623,7 @@ If using a WS2812B LED ring (24-bit recommended):
 | GND | Pin 6 |
 | DIN | Pin 19 (GPIO 10 / SPI) |
 
-Soldering required to attach jumper wires to the LED ring pads (PWR, GND, DIN). Use female-to-female jumper wires from the ring to the Pi GPIO header.
+Soldering required to attach jumper wires to the LED ring pads (PWR, GND, DIN). Use female-to-male jumper wires from the ring to the Pi GPIO header.
 
 > **Note:** GPIO 18 (PWM) conflicts with the Pi's onboard audio driver (`snd_bcm2835`). GPIO 10 (SPI) avoids this conflict. SPI must be enabled: `sudo raspi-config nonint do_spi 0`.
 
@@ -638,7 +638,7 @@ Soldering required to attach jumper wires to the LED ring pads (PWR, GND, DIN). 
 - Lower `OWW_THRESHOLD` in `sage.py` if Sage consistently misses you (try 0.75)
 
 **Whisper recognition is poor**
-- Fan noise is the most common issue — a USB extension cable for the mic helps significantly
+- Fan noise is the most common issue with generic microphones — a USB extension cable for the mic helps significantly
 - faster-whisper with the base.en model balances speed and accuracy on Pi 4
 - Sage calibrates a noise baseline before each recording to filter ambient noise
 
@@ -704,10 +704,10 @@ Soldering required to attach jumper wires to the LED ring pads (PWR, GND, DIN). 
 
 - Free to use, fork, and modify for personal and non-commercial use
 - Commercial use requires written permission from the copyright holder
-- Attribution required: **Britta Davis / [oh golly britta](https://ohgollybritta.com)**
+- Attribution required: **Britta Davis / [ohgollybritta](https://ohgollybritta.com)**
 
 See [LICENSE](LICENSE) for full terms.
 
 ---
 
-*Built by [oh golly britta](https://ohgollybritta.com)*
+*Built by [ohgollybritta](https://ohgollybritta.com)*
