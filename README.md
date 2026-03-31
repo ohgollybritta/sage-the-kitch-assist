@@ -1,4 +1,4 @@
-# Sage v1.4.9 🌿
+# Sage v2.0.0 🌿
 ### A privacy-first voice assistant for your kitchen, built on a Raspberry Pi.
 
 Sage is an open-source voice assistant that does the everyday things a kitchen assistant should do — set timers, give weather reports, manage reminders, chat with Claude AI — without sending your voice to the cloud. The voice pipeline runs entirely on a Raspberry Pi.
@@ -82,8 +82,8 @@ A **USB conference speakerphone** like the **Jabra SPEAK 510** is optional but h
 ### Bedtime & Morning
 - 😴 **Bedtime mode** — "Goodnight" silences alerts, dims lights
 - ☀️ **Morning briefing** — "Good morning" triggers weather + calendar
-- ⏰ Auto bedtime: 10 PM weekdays, 11:30 PM weekends
-- ⏰ Auto wake: 6:30 AM weekdays, 8:30 AM weekends with full briefing
+- ⏰ Auto bedtime: 9:30 PM weekdays, 10:30 PM weekends
+- ⏰ Auto wake: 6:30 AM weekdays, 8:30 AM Sat/Sun with full briefing
 
 ### Music (Spotify)
 - 🎵 **Spotify playback** — "Play Fleetwood Mac", "Put on some jazz", "Listen to Taylor Swift"
@@ -98,8 +98,14 @@ A **USB conference speakerphone** like the **Jabra SPEAK 510** is optional but h
 - 🎵 **Now playing** — "What's playing?", "What song is this?", "Who is this?", "Who sings this?"
 - 🎵 **Auto-pause on wake** — Sage pauses Spotify when it hears "Hey Sage" so it can hear your command, then resumes if the command wasn't music-related
 - 🎵 **Plays through the Pi** — Raspotify turns the Pi into a Spotify Connect speaker
-- 🎵 **Hardcoded device fallback** — if the Spotify API can't find the speaker, Sage falls back to a known device ID and restarts Raspotify automatically
+- 🎵 **Dynamic device discovery** — Sage finds the Spotify Connect speaker by name ("Sage"), caches the device ID, and restarts Raspotify as a last resort if the device disappears
 - 🎵 **Liked songs shuffle** — "Play Spotify" or "Play music" with nothing active shuffles your saved/liked songs
+
+### Speaker Volume
+- 🔊 **Turn yourself up/down** — adjusts Sage's hardware speaker volume (separate from Spotify)
+- 🔊 **Talk louder / Talk quieter** — natural phrasing for volume control
+- 🔊 **Speaker volume up/down** — explicit speaker volume commands
+- 🔊 Works through PulseAudio or ALSA depending on your setup
 
 ### Personality
 - 🎭 Varied responses — Sage doesn't repeat the same phrase
@@ -156,7 +162,7 @@ sudo apt update && sudo apt upgrade -y
 
 ```bash
 sudo apt install -y python3-pip python3-pyaudio git cmake
-pip3 install vosk faster-whisper spotipy python-dateutil icalendar --break-system-packages
+pip3 install vosk faster-whisper spotipy python-dateutil icalendar onnxruntime --break-system-packages
 ```
 
 ### 5. Install Vosk model (wake word detection)
@@ -382,25 +388,14 @@ Spotify on Sage involves three separate components that must all be on the **sam
 
 #### Device discovery and the idle problem
 
-Raspotify only appears in the Spotify device list when it has recently been active. After being idle for a while, it becomes invisible to `sp.devices()`. Sage handles this with:
+Raspotify only appears in the Spotify device list when it has recently been active. After being idle for a while, it becomes invisible to `sp.devices()`. Sage handles this automatically with dynamic device discovery:
 
-1. **Hardcoded device ID fallback** — if the API can't find the device, Sage uses a known device ID stored in the code
-2. **Auto-restart** — if the hardcoded ID also fails, Sage restarts the Raspotify service and retries
+1. **Name-based lookup** — Sage searches `sp.devices()` for a device named "Sage" (the Raspotify device name)
+2. **Cached device ID** — once found, the device ID is cached to avoid repeated API calls
 3. **`transfer_playback()`** — attempts to wake the device by transferring playback to it directly
+4. **Auto-restart** — if all else fails, Sage restarts the Raspotify service and retries
 
-To get the device ID for your setup, play something on Sage from the Spotify app, then run:
-
-```python
-python3 -c "
-import spotipy
-from spotipy.oauth2 import SpotifyOAuth
-sp = spotipy.Spotify(auth_manager=SpotifyOAuth(...))
-for d in sp.devices()['devices']:
-    print(f\"{d['name']}: {d['id']}\")
-"
-```
-
-Copy the Sage device ID into the `_SAGE_DEVICE_ID` variable in `sage.py`.
+No hardcoded device IDs needed — Sage discovers the speaker automatically on every boot and after every Raspotify restart.
 
 ### 8a. Find your audio devices
 
@@ -499,20 +494,28 @@ sudo ufw --force enable
 
 ### 12. Wake word tuning
 
-Wake word detection uses **Vosk** (local speech recognition). Vosk listens continuously and triggers when it hears "hey sage" (or common mishearings like "they sage", "hey stage").
+Wake word detection uses a **dual-detector** approach:
+
+1. **MFCC wake word model** (primary) — a custom GradientBoosting classifier trained on temporal MFCC features. Extracts 362-dimensional feature vectors from 2-second audio clips, dividing frames into 8 temporal segments to preserve *when* sounds happen, not just what. Exported as an ONNX model (`hey_sage_mfcc_v5.onnx`). Runs inference every 2 audio chunks when audio energy exceeds the RMS gate.
+
+2. **Vosk** (fallback) — local speech recognition that listens for "hey sage" and common mishearings ("they sage", "hey stage"). Always running as a safety net.
+
+Either detector can trigger the wake word. Both run entirely on-device.
 
 #### Tuning sensitivity
 
 - `DAYTIME_RMS_GATE` — minimum audio energy to trigger during the day (default: 80). Lower = more sensitive, higher = requires louder speech.
 - `BEDTIME_RMS_GATE` — minimum audio energy to trigger at night (default: 100). Slightly higher to avoid accidental triggers from sleep-talking or ambient noise.
-- Both values are in `sage.py`. Adjust based on your mic distance and environment.
+- `WW_THRESHOLD` — MFCC model confidence threshold (default: 0.92). Higher = fewer false triggers but may require more attempts.
+- `WW_COOLDOWN` — minimum seconds between MFCC wake triggers (default: 5). Prevents rapid re-triggering.
+- All values are in `sage.py`. Adjust based on your mic distance and environment.
 
 ---
 
 ## How it works
 
 ```
-Wake word detection (Vosk)
+Wake word detection (MFCC model + Vosk fallback)
               |
      "Hey Sage" detected → Chime → Record audio
               |                         |
@@ -584,6 +587,9 @@ All speech processing happens on-device. Outbound network traffic is limited to:
 | "Turn your volume to zero" / "All the way down" / "Silent" | Set volume to 0% |
 | "What's playing?" / "What song is this?" | Currently playing track + artist |
 | "Who is this?" / "Who sings this?" | Identify current artist |
+| "Turn yourself up/down" | Adjust Sage's speaker volume |
+| "Speaker volume up/down" | Adjust Sage's speaker volume |
+| "Talk louder" / "Talk quieter" | Adjust Sage's speaker volume |
 | "Nevermind" / "Cancel" / "Forget it" / "Nope" | Dismiss a false wake trigger |
 
 ### Claude commands (requires API key)
@@ -616,8 +622,10 @@ Soldering required to attach jumper wires to the LED ring pads (PWR, GND, DIN). 
 ## Troubleshooting
 
 **Wake word not triggering**
-- Vosk recognizes "hey sage" and common mishearings ("they sage", "hey stage", etc.)
+- Sage uses dual detection: MFCC model (primary) + Vosk (fallback)
+- The MFCC model requires sufficient audio energy (`RMS_GATE * 2`) and buffer energy (`_buf_rms > 150`) to run inference
 - Lower `DAYTIME_RMS_GATE` in `sage.py` if Sage consistently misses you (default: 80)
+- Lower `WW_THRESHOLD` (default: 0.92) if the MFCC model isn't triggering — but too low causes false positives
 - Move the mic away from the Pi's fan if possible (USB extension cable helps)
 
 **Whisper recognition is poor**
@@ -642,7 +650,7 @@ Soldering required to attach jumper wires to the LED ring pads (PWR, GND, DIN). 
 - Check that Raspotify is running: `systemctl status raspotify`
 - Check Raspotify logs for crashes: `journalctl -u raspotify -n 20`
 - If you see `Unsupported Sample Rate 44100` — your speaker doesn't support 44100 Hz. Use `plughw:X,0` (not `hw:X,0`) in the Raspotify config so ALSA handles rate conversion
-- The Spotify device goes idle/invisible after inactivity — play something from the Spotify app to wake it up, then voice commands will work
+- The Spotify device goes idle/invisible after inactivity — Sage automatically restarts Raspotify and retries when this happens
 - Verify firewall allows mDNS: `sudo ufw status` should show port 5353/udp open
 - Check `avahi-daemon` is running: `systemctl status avahi-daemon`
 
@@ -657,8 +665,10 @@ Soldering required to attach jumper wires to the LED ring pads (PWR, GND, DIN). 
 - Sage auto-pauses Spotify when it detects the wake word, but the word must be heard first
 - With a single-mic setup and no AEC, keeping Spotify volume at 75% or lower helps
 **Too many false wake triggers (TV, ambient noise)**
+- Raise `WW_THRESHOLD` (default: 0.92) to require higher MFCC model confidence
 - Raise `DAYTIME_RMS_GATE` in `sage.py` (default: 80) to require louder speech
-- Vosk's language model naturally filters most non-speech sounds
+- Increase `WW_COOLDOWN` (default: 5 seconds) to prevent rapid re-triggering
+- The MFCC model was trained on 1,800 real ambient clips — if your environment differs significantly, retraining may help
 
 **Service won't start**
 - Check logs: `journalctl -u sage -f`
@@ -670,7 +680,7 @@ Soldering required to attach jumper wires to the LED ring pads (PWR, GND, DIN). 
 
 - Voice is processed by [Vosk](https://alphacephei.com/vosk/) and [Faster Whisper](https://github.com/SYSTRAN/faster-whisper) running locally on the Pi
 - Text-to-speech is handled by [Piper](https://github.com/rhasspy/piper) running locally on the Pi
-- Wake word detection uses [Vosk](https://alphacephei.com/vosk/) running locally
+- Wake word detection uses a custom MFCC model (ONNX) + [Vosk](https://alphacephei.com/vosk/) fallback, both running locally
 - No audio is ever sent to an external server or stored
 - Claude AI chat is **opt-in** — only activates when you say "Hey Claude" and requires your own API key
 - Internet is used only for: Spotify, weather (Open-Meteo), calendar (iCal), push notifications (ntfy), and Claude API

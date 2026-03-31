@@ -267,14 +267,14 @@ if _speaker_card:
     SPEAKER_DEVICE = f"plughw:{_speaker_card},0"
     print(f"Speaker: card {_speaker_card} ({SPEAKER_DEVICE})")
 else:
-    SPEAKER_DEVICE = "plughw:4,0"
-    print("WARNING: USB speaker not found, using default plughw:4,0")
+    SPEAKER_DEVICE = "plughw:1,0"
+    print("WARNING: USB speaker not found, using default plughw:1,0")
 if _mic_card:
     MIC_HW_DEVICE = f"plughw:{_mic_card},0"
     print(f"Mic: card {_mic_card} ({MIC_HW_DEVICE})")
 else:
-    MIC_HW_DEVICE = "plughw:3,0"
-    print("WARNING: USB mic not found, using default plughw:3,0")
+    MIC_HW_DEVICE = "plughw:1,0"
+    print("WARNING: USB mic not found, using default plughw:1,0")
 sys.stdout.flush()
 
 # ── PulseAudio routing (preferred over raw ALSA when available) ───────────────
@@ -641,8 +641,8 @@ def play_alarm_loop(stop_event):
                     ap.stdin.write(ALARM_PATTERN)
                 ap.stdin.close()
                 ap.wait()
-            except BrokenPipeError:
-                print(f"Error: {e}", flush=True)
+            except BrokenPipeError as e:
+                print(f"Alarm pipe error: {e}", flush=True)
             if not stop_event.is_set():
                 break
             # Request mic from main loop
@@ -673,7 +673,13 @@ timers_lock = threading.Lock()
 
 def run_timer(timer):
     """Wait for the timer duration, then alarm until dismissed."""
-    time.sleep(timer["seconds"])
+    # Sleep in 1s increments so cancellation works
+    for _tick in range(timer["seconds"]):
+        if timer.get("cancelled"):
+            return
+        time.sleep(1)
+    if timer.get("cancelled"):
+        return
     timer["alarming"].set()
     alarm_playing.set()  # Block main loop BEFORE speaking
     print(f"ALARM: {timer['label']} is done!")
@@ -732,7 +738,7 @@ def cancel_timers():
             if not timer["alarming"].is_set():
                 # Timer is still counting down — stop its thread by clearing and removing
                 timer["alarming"].clear()
-                timer["seconds"] = 0  # won't help sleeping thread, but mark it
+                timer["cancelled"] = True  # signals the 1s sleep loop to exit
                 cancelled.append(timer["label"])
                 active_timers.remove(timer)
     return cancelled
@@ -781,11 +787,10 @@ def parse_duration(text):
         "fifty": 50, "sixty": 60, "ninety": 90,
         "a": 1, "an": 1,
     }
-    # Replace word numbers with digits
+    # Replace word numbers with digits (word-boundary aware)
     working = text.lower()
-    # Handle compound numbers like "twenty five"
     for word, num in sorted(word_to_num.items(), key=lambda x: -len(x[0])):
-        working = working.replace(word, str(num))
+        working = re.sub(r'\b' + re.escape(word) + r'\b', str(num), working)
 
     total = 0
     # Find all number + unit pairs
@@ -845,6 +850,75 @@ def exit_bedtime():
     lights.set_state("idle")
     print("Bedtime mode OFF", flush=True)
 
+
+def get_weather(tomorrow=False):
+    """Fetch weather from Open-Meteo API. Returns spoken text or None."""
+    try:
+        days = 2 if tomorrow else 1
+        url = ("https://api.open-meteo.com/v1/forecast?latitude=38.7631&longitude=-77.2311"
+               "&current=temperature_2m,weather_code,wind_speed_10m"
+               "&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code"
+               f"&temperature_unit=fahrenheit&wind_speed_unit=mph"
+               f"&timezone=America/New_York&forecast_days={days}")
+        data = json.loads(urllib.request.urlopen(url, timeout=10).read())
+        d = data["daily"]
+        conditions = {0: "clear skies", 1: "mostly clear", 2: "partly cloudy", 3: "overcast",
+                     45: "foggy", 48: "foggy", 51: "light drizzle", 53: "drizzle",
+                     55: "heavy drizzle", 61: "light rain", 63: "rain", 65: "heavy rain",
+                     71: "light snow", 73: "snow", 75: "heavy snow", 80: "rain showers",
+                     81: "rain showers", 82: "heavy rain showers", 95: "thunderstorm"}
+
+        if tomorrow:
+            idx = 1
+            high = int(d["temperature_2m_max"][idx])
+            low = int(d["temperature_2m_min"][idx])
+            rain_chance = d["precipitation_probability_max"][idx]
+            wc = d["weather_code"][idx]
+            desc = conditions.get(wc, "unknown conditions")
+            response = f"Tomorrow's forecast: {desc} with a high of {high} and a low of {low}. "
+        else:
+            idx = 0
+            c = data["current"]
+            temp = int(c["temperature_2m"])
+            wind = int(c["wind_speed_10m"])
+            wc = c["weather_code"]
+            high = int(d["temperature_2m_max"][idx])
+            low = int(d["temperature_2m_min"][idx])
+            rain_chance = d["precipitation_probability_max"][idx]
+            desc = conditions.get(wc, "unknown conditions")
+            response = f"Right now it's {temp} degrees with {desc}. "
+            response += f"Today's high is {high} and the low is {low}. "
+
+        if rain_chance > 10:
+            response += f"There's a {rain_chance} percent chance of rain. "
+        else:
+            day_word = "tomorrow" if tomorrow else "today"
+            response += f"No rain expected {day_word}. "
+
+        tips = []
+        if rain_chance >= 50:
+            tips.append("Grab an umbrella")
+        elif rain_chance >= 30:
+            tips.append("You might want an umbrella just in case")
+        if low <= 40:
+            tips.append("Bundle up, it's going to be cold")
+        elif low <= 55:
+            tips.append("Bring a jacket")
+        if high >= 90:
+            tips.append("Stay hydrated, it's going to be hot")
+        if not tomorrow:
+            wind = int(data["current"]["wind_speed_10m"])
+            if wind >= 20:
+                tips.append("It's windy out there")
+        if tips:
+            response += " ".join(tips) + "."
+        else:
+            response += "Looks like a nice day!"
+        return response
+    except Exception as e:
+        print(f"Weather error: {e}", flush=True)
+        return None
+
 def bedtime_scheduler():
     """Auto-enable bedtime at 10pm weekdays, 11:30pm weekends. Auto-wake at 6am."""
     while True:
@@ -855,8 +929,8 @@ def bedtime_scheduler():
 
         is_weekend = weekday in [4, 5]  # Fri/Sat night
 
-        # Auto-bedtime
-        if not bedtime_mode.is_set():
+        # Auto-bedtime (disabled during development)
+        if False and not bedtime_mode.is_set():
             if is_weekend and hour == 22 and minute == 30:
                 speak("It's 10:30. Goodnight everyone.")
                 enter_bedtime()
@@ -864,12 +938,13 @@ def bedtime_scheduler():
                 speak("It's 9:30. Goodnight everyone.")
                 enter_bedtime()
 
-        # Auto-wake: 6:30am weekdays, 8:30am weekends
+        # Auto-wake: 6:30am weekdays, 8:30am weekends (Sat/Sun morning)
         if bedtime_mode.is_set():
             wake_up = False
-            if is_weekend and hour == 8 and minute == 30:
+            is_weekend_morning = weekday in [5, 6]  # Sat/Sun morning
+            if is_weekend_morning and hour == 8 and minute == 30:
                 wake_up = True
-            elif not is_weekend and hour == 6 and minute == 30:
+            elif not is_weekend_morning and hour == 6 and minute == 30:
                 wake_up = True
             if wake_up:
                 exit_bedtime()
@@ -889,12 +964,12 @@ def bedtime_scheduler():
                     elif len(events) == 1:
                         e = events[0]
                         time_str = e["time"].strftime("%I:%M %p").lstrip("0")
-                        speak(f"{e[summary]} at {time_str}.")
+                        speak(f"{e['summary']} at {time_str}.")
                     else:
                         speak(f"You have {len(events)} things on the calendar today.")
                         for e in events:
                             time_str = e["time"].strftime("%I:%M %p").lstrip("0")
-                            speak(f"{e[summary]} at {time_str}.")
+                            speak(f"{e['summary']} at {time_str}.")
                 except Exception as e:
                     print(f"Error: {e}", flush=True)
 
@@ -1094,7 +1169,7 @@ try:
     import RPi.GPIO as _GPIO
     _GPIO.setmode(_GPIO.BCM)
     _GPIO.setup(FAN_PIN, _GPIO.OUT)
-    _GPIO.output(FAN_PIN, _GPIO.HIGH)   # active-low: HIGH = fan off
+    _GPIO.output(FAN_PIN, _GPIO.HIGH)   # fan on always-on 5V pin — GPIO control reserved for future MOSFET
     _fan_gpio_available = True
     print("Fan controller ready (GPIO 14)", flush=True)
 except Exception as _e:
@@ -1105,7 +1180,7 @@ def _set_fan(on):
     global _fan_on
     if not _fan_gpio_available:
         return
-    _GPIO.output(FAN_PIN, _GPIO.LOW if on else _GPIO.HIGH)  # active-low
+    _GPIO.output(FAN_PIN, _GPIO.LOW if on else _GPIO.HIGH)  # requires MOSFET for actual control
     _fan_on = on
     print(f"Fan {'ON' if on else 'OFF'}", flush=True)
 
@@ -1302,7 +1377,7 @@ def handle_command(text):
                 reminder_alarming.set()
                 while reminder_alarming.is_set():
                     speak(f"Reminder: {msg}")
-                    play_alarm_chime()
+                    _play_raw(ALARM_PATTERN)
                     for _ in range(24):
                         if not reminder_alarming.is_set():
                             break
@@ -1339,7 +1414,7 @@ def handle_command(text):
                     reminder_alarming.set()
                     while reminder_alarming.is_set():
                         speak(f"Reminder: {msg}")
-                        play_alarm_chime()
+                        _play_raw(ALARM_PATTERN)
                         for _ in range(24):
                             if not reminder_alarming.is_set():
                                 break
@@ -1421,73 +1496,43 @@ def handle_command(text):
     # Weather
     if "weather" in text or "temperature" in text or "outside" in text:
         is_tomorrow = "tomorrow" in text
-        try:
-            days = 2 if is_tomorrow else 1
-            url = ("https://api.open-meteo.com/v1/forecast?latitude=38.7631&longitude=-77.2311"
-                   "&current=temperature_2m,weather_code,wind_speed_10m"
-                   "&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code"
-                   f"&temperature_unit=fahrenheit&wind_speed_unit=mph"
-                   f"&timezone=America/New_York&forecast_days={days}")
-            data = json.loads(urllib.request.urlopen(url, timeout=10).read())
-            d = data["daily"]
-            conditions = {0: "clear skies", 1: "mostly clear", 2: "partly cloudy", 3: "overcast",
-                         45: "foggy", 48: "foggy", 51: "light drizzle", 53: "drizzle",
-                         55: "heavy drizzle", 61: "light rain", 63: "rain", 65: "heavy rain",
-                         71: "light snow", 73: "snow", 75: "heavy snow", 80: "rain showers",
-                         81: "rain showers", 82: "heavy rain showers", 95: "thunderstorm"}
-
-            if is_tomorrow:
-                idx = 1
-                high = int(d["temperature_2m_max"][idx])
-                low = int(d["temperature_2m_min"][idx])
-                rain_chance = d["precipitation_probability_max"][idx]
-                wc = d["weather_code"][idx]
-                desc = conditions.get(wc, "unknown conditions")
-                response = f"Tomorrow's forecast: {desc} with a high of {high} and a low of {low}. "
-            else:
-                idx = 0
-                c = data["current"]
-                temp = int(c["temperature_2m"])
-                wind = int(c["wind_speed_10m"])
-                wc = c["weather_code"]
-                high = int(d["temperature_2m_max"][idx])
-                low = int(d["temperature_2m_min"][idx])
-                rain_chance = d["precipitation_probability_max"][idx]
-                desc = conditions.get(wc, "unknown conditions")
-                response = f"Right now it's {temp} degrees with {desc}. "
-                response += f"Today's high is {high} and the low is {low}. "
-
-            if rain_chance > 10:
-                response += f"There's a {rain_chance} percent chance of rain. "
-            else:
-                day_word = "tomorrow" if is_tomorrow else "today"
-                response += f"No rain expected {day_word}. "
-
-            # Smart tips
-            tips = []
-            if rain_chance >= 50:
-                tips.append("Grab an umbrella")
-            elif rain_chance >= 30:
-                tips.append("You might want an umbrella just in case")
-            if low <= 40:
-                tips.append("Bundle up, it's going to be cold")
-            elif low <= 55:
-                tips.append("Bring a jacket")
-            if high >= 90:
-                tips.append("Stay hydrated, it's going to be hot")
-            if not is_tomorrow:
-                wind = int(data["current"]["wind_speed_10m"])
-                if wind >= 20:
-                    tips.append("It's windy out there")
-            if tips:
-                response += " ".join(tips) + "."
-            else:
-                response += "Looks like a nice day!"
-            speak(response)
-        except Exception as e:
-            print(f"Weather error: {e}", flush=True)
+        weather_text = get_weather(tomorrow=is_tomorrow)
+        if weather_text:
+            speak(weather_text)
+        else:
             speak("Sorry, I couldn't get the weather right now.")
         return
+    # Speaker volume — Sage's own output volume (Jabra, 0-11)
+    _sage_vol_triggers = ("your volume", "speaker volume", "turn yourself",
+                          "you're too loud", "you're too quiet", "speak louder",
+                          "speak quieter", "talk louder", "talk quieter",
+                          "sage volume", "sage louder", "sage quieter")
+    if any(t in text for t in _sage_vol_triggers):
+        # Read current volume from amixer
+        try:
+            r = subprocess.run(["amixer", "-c", str(_speaker_card), "cget", "numid=4"],
+                               capture_output=True, text=True, timeout=5)
+            cur = int(r.stdout.split("values=")[1].split(",")[0].strip()) if "values=" in r.stdout else 11
+        except Exception:
+            cur = 11
+        if any(w in text for w in ("up", "louder", "raise", "higher")):
+            new_vol = min(11, cur + 2)
+            _set_speaker_volume(new_vol)
+            speak(f"Volume up to {new_vol}")
+        elif any(w in text for w in ("down", "quieter", "lower", "softer")):
+            new_vol = max(1, cur - 2)
+            _set_speaker_volume(new_vol)
+            speak(f"Volume down to {new_vol}")
+        elif any(w in text for w in ("max", "maximum", "full", "all the way up")):
+            _set_speaker_volume(11)
+            speak("Full volume")
+        elif any(w in text for w in ("minimum", "min", "low", "all the way down")):
+            _set_speaker_volume(2)
+            speak("Minimum volume")
+        else:
+            speak(f"My volume is at {cur} out of 11")
+        return
+
     # Spotify — play, pause, skip, resume, volume, what's playing
     _spotify_play_phrases = ("play ", "put on ", "throw on ", "listen to ",
                              "queue up ", "shuffle ", "turn on ", "i want to hear ",
@@ -1503,50 +1548,53 @@ def handle_command(text):
 
     if _is_spotify_play or _is_spotify_ctrl or _is_spotify_music:
 
-        _SAGE_DEVICE_ID = "c3bd776c4465937f9c7abf94dfba78d9fa39b9d3"
+        _cached_device_id = None
 
         def _get_device(retries=3):
-            """Get Sage raspotify device, with hardcoded fallback."""
-            import time as _time
+            """Discover Sage's Spotify Connect device by name."""
+            nonlocal _cached_device_id
             for attempt in range(retries):
                 try:
                     devices = sp.devices()["devices"]
                     for d in devices:
                         if "sage" in d.get("name", "").lower():
+                            _cached_device_id = d["id"]
                             return d["id"]
                     if devices:
+                        _cached_device_id = devices[0]["id"]
                         return devices[0]["id"]
                 except Exception as e:
                     print(f"Device list attempt {attempt+1} failed: {e}", flush=True)
                 if attempt < retries - 1:
-                    _time.sleep(2)
+                    time.sleep(2)
             return None
 
         def _ensure_device():
-            """Get device, fall back to hardcoded Sage ID, restart raspotify as last resort."""
-            dev = _get_device(retries=1)
+            """Get device, restart raspotify if needed. No hardcoded IDs."""
+            nonlocal _cached_device_id
+            dev = _get_device(retries=2)
             if dev:
                 return dev
-            # Try hardcoded device ID directly
-            print("No device in list, trying hardcoded Sage ID...", flush=True)
-            try:
-                sp.transfer_playback(_SAGE_DEVICE_ID, force_play=False)
-                import time as _time
-                _time.sleep(2)
-                return _SAGE_DEVICE_ID
-            except Exception as e:
-                print(f"Transfer to hardcoded ID failed: {e}", flush=True)
-            # Last resort: restart raspotify
+            # Try cached ID from last successful lookup
+            if _cached_device_id:
+                print(f"No device in list, trying cached ID...", flush=True)
+                try:
+                    sp.transfer_playback(_cached_device_id, force_play=False)
+                    time.sleep(2)
+                    return _cached_device_id
+                except Exception as e:
+                    print(f"Cached ID failed: {e}", flush=True)
+                    _cached_device_id = None
+            # Last resort: restart raspotify and wait for it to register
             print("Restarting raspotify...", flush=True)
-            import subprocess
             subprocess.run(["sudo", "systemctl", "restart", "raspotify"], timeout=10)
-            import time as _time
-            _time.sleep(5)
-            dev = _get_device(retries=3)
+            time.sleep(8)  # raspotify needs time to connect to Spotify
+            dev = _get_device(retries=5)
             if dev:
+                print(f"Raspotify reconnected: {dev}", flush=True)
                 return dev
-            # Final fallback: just return the hardcoded ID
-            return _SAGE_DEVICE_ID
+            print("ERROR: Could not find Spotify device after restart", flush=True)
+            return None
 
         try:
             # Pause / stop music
@@ -1910,14 +1958,14 @@ def handle_command(text):
     if "light" in text or "lights" in text:
         if any(w in text for w in ["turn off", "off", "disable", "kill"]):
             if "fairy" in text or "ambient" in text:
-                # TODO: control USB fairy lights power via relay/smart plug
+                # Fairy light control not yet implemented
                 speak("Fairy lights off.")
             else:
                 lights.set_state("off")
                 speak("Indicator lights off.")
         elif any(w in text for w in ["turn on", "on", "enable"]):
             if "fairy" in text or "ambient" in text:
-                # TODO: control USB fairy lights power via relay/smart plug
+                # Fairy light control not yet implemented
                 speak("Fairy lights on.")
             else:
                 lights.set_state("idle")
@@ -1966,7 +2014,7 @@ def handle_command(text):
             math_text = math_text.replace("square root of", "sqrt(") 
             math_text = math_text.replace("percent of", "* 0.01 *")
             math_text = math_text.replace("infinity", "oo")
-            math_text = math_text.replace("x", "*")
+            math_text = re.sub(r"(?<![a-z])x(?![a-z])", "*", math_text)  # standalone x only
 
             # Close any open sqrt parens
             if "sqrt(" in math_text and ")" not in math_text:
@@ -2009,7 +2057,103 @@ except Exception as e:
 
 rec = KaldiRecognizer(model, VOSK_RATE)
 
-# Wake word detection handled by Vosk only
+
+# ── MFCC Wake Word Detector v4 ────────────────────────────────────────────────
+import onnxruntime as _ww_ort
+from scipy.fftpack import dct as _ww_dct
+from scipy.signal import get_window as _ww_get_window
+
+def _ww_hz_to_mel(hz):
+    return 2595.0 * np.log10(1.0 + hz / 700.0)
+
+def _ww_mel_to_hz(mel):
+    return 700.0 * (10.0 ** (mel / 2595.0) - 1.0)
+
+_ww_fb_cache = None
+
+def _ww_mel_filterbank(num_filters, fft_size, sr):
+    mel_points = np.linspace(_ww_hz_to_mel(0), _ww_hz_to_mel(sr / 2), num_filters + 2)
+    hz_points = _ww_mel_to_hz(mel_points)
+    bins = np.floor((fft_size + 1) * hz_points / sr).astype(int)
+    fb = np.zeros((num_filters, fft_size // 2 + 1))
+    for i in range(num_filters):
+        for j in range(bins[i], bins[i + 1]):
+            fb[i, j] = (j - bins[i]) / max(bins[i + 1] - bins[i], 1)
+        for j in range(bins[i + 1], bins[i + 2]):
+            fb[i, j] = (bins[i + 2] - j) / max(bins[i + 2] - bins[i + 1], 1)
+    return fb
+
+def _ww_extract_features(samples_int16, sr=16000, num_mfcc=13, num_filters=26, fft_size=512, n_segments=8):
+    """Extract 362-dim temporal MFCC features — preserves frame order."""
+    global _ww_fb_cache
+    samples = samples_int16.astype(np.float32) / 32768.0
+    emph = np.append(samples[0], samples[1:] - 0.97 * samples[:-1])
+    fl = int(0.025 * sr); fs = int(0.01 * sr)
+    nf = max(1, 1 + (len(emph) - fl) // fs)
+    padded = np.append(emph, np.zeros(nf * fs + fl - len(emph)))
+    idx = (np.tile(np.arange(fl), (nf, 1)) +
+           np.tile(np.arange(0, nf * fs, fs), (fl, 1)).T)
+    frames = padded[idx.astype(int)] * _ww_get_window('hamming', fl)
+    mag = np.absolute(np.fft.rfft(frames, fft_size))
+    power = mag ** 2 / fft_size
+    if _ww_fb_cache is None:
+        _ww_fb_cache = _ww_mel_filterbank(num_filters, fft_size, sr)
+    ms = np.dot(power, _ww_fb_cache.T)
+    ms = np.where(ms == 0, np.finfo(float).eps, ms)
+    log_mel = np.log(ms)
+    mfcc = _ww_dct(log_mel, type=2, axis=1, norm='ortho')[:, :num_mfcc]
+    deltas = np.zeros_like(mfcc)
+    for t in range(1, len(mfcc) - 1):
+        deltas[t] = (mfcc[t + 1] - mfcc[t - 1]) / 2
+    deltas[0] = deltas[1]; deltas[-1] = deltas[-2]
+
+    seg_size = max(1, nf // n_segments)
+    features = []
+    for s in range(n_segments):
+        start = s * seg_size
+        end = min(start + seg_size, nf)
+        seg = mfcc[start:end]
+        features.extend(seg.mean(axis=0))
+        features.extend(seg.std(axis=0))
+    for s in range(n_segments):
+        start = s * seg_size
+        end = min(start + seg_size, nf)
+        features.extend(deltas[start:end].mean(axis=0))
+    seg_len = max(1, len(samples) // n_segments)
+    for s in range(n_segments):
+        chunk = samples[s * seg_len:(s + 1) * seg_len]
+        features.append(np.sqrt(np.mean(chunk ** 2)))
+    sc = np.sum(log_mel * np.arange(log_mel.shape[1]), axis=1) / (np.sum(log_mel, axis=1) + 1e-10)
+    for s in range(n_segments):
+        start = s * seg_size
+        end = min(start + seg_size, nf)
+        features.append(sc[start:end].mean())
+    for s in range(n_segments):
+        chunk = samples[s * seg_len:(s + 1) * seg_len]
+        if len(chunk) > 1:
+            features.append(np.sum(np.abs(np.diff(np.sign(chunk)))) / (2 * len(chunk)))
+        else:
+            features.append(0)
+    features.extend(mfcc.mean(axis=0))
+    features.extend(mfcc.std(axis=0))
+    return np.array(features, dtype=np.float32)
+
+# Load MFCC wake word model
+_ww_session = None
+_ww_input_name = None
+WW_THRESHOLD = 0.92
+WW_COOLDOWN = 5  # seconds between triggers
+try:
+    _ww_session = _ww_ort.InferenceSession("/home/sage/hey_sage_mfcc_v5.onnx")
+    _ww_input_name = _ww_session.get_inputs()[0].name
+    print("MFCC wake word v5 loaded (hey_sage_mfcc_v5.onnx)", flush=True)
+except Exception as e:
+    print(f"Wake word model not loaded: {e}", flush=True)
+
+# Rolling audio buffer (2 seconds at 16kHz)
+_ww_audio_buffer = np.zeros(32000, dtype=np.int16)
+_ww_check_counter = 0
+_ww_last_trigger = 0
 
 # Suppress Jack/Pulse stderr during PyAudio init
 _devnull = os.open(os.devnull, os.O_WRONLY)
@@ -2222,7 +2366,30 @@ while True:
     rms_peak = max(whisper_listen._rms_window)
     data = data_raw  # MIC_RATE == VOSK_RATE, no conversion needed
 
-    
+    # ── MFCC wake word check (every ~0.5s = every 2 chunks) ────────────
+    ww_detected = False
+    ww_prob = 0.0
+    _ww_check_counter += 1
+    chunk_samples = np.frombuffer(data_raw, dtype=np.int16)
+    _ww_audio_buffer = np.roll(_ww_audio_buffer, -len(chunk_samples))
+    _ww_audio_buffer[-len(chunk_samples):] = chunk_samples[:len(_ww_audio_buffer)]
+
+    # Check buffer has enough speech energy (not mostly silence/zeros)
+    _buf_rms = int(np.sqrt(np.mean(_ww_audio_buffer.astype(np.float32) ** 2)))
+    if _ww_check_counter >= 2 and _ww_session and rms_peak > RMS_GATE * 2 and _buf_rms > 150:
+        _ww_check_counter = 0
+        try:
+            features = _ww_extract_features(_ww_audio_buffer, sr=16000)
+            result = _ww_session.run(None, {_ww_input_name: features.reshape(1, -1)})
+            ww_prob = result[1][0][1] if isinstance(result[1][0], dict) else result[1][0][1]
+            if ww_prob > 0.5:
+                print(f"MFCC v5: {ww_prob:.3f} rms:{rms_peak}{'  *** TRIGGERED ***' if ww_prob > WW_THRESHOLD else ''}", flush=True)
+            if ww_prob > WW_THRESHOLD and (time.time() - _ww_last_trigger) > WW_COOLDOWN:
+                ww_detected = True
+                _ww_last_trigger = time.time()
+        except Exception as e:
+            print(f"Wake word error: {e}", flush=True)
+
     vosk_detected = False
     if not hasattr(whisper_listen, '_vosk_last_trigger'):
         whisper_listen._vosk_last_trigger = 0
@@ -2237,10 +2404,10 @@ while True:
             whisper_listen._vosk_last_trigger = time.time()
 
 
-    # Vosk wake word detection — requires minimum energy
-    _wake_confirmed = vosk_detected and rms_peak > RMS_GATE
+    # Wake word — MFCC primary, Vosk fallback
+    _wake_confirmed = ww_detected or (vosk_detected and rms_peak > RMS_GATE)
     if _wake_confirmed:
-        source = f"Vosk: {text}"
+        source = f"MFCC: {ww_prob:.3f}" if ww_detected else f"Vosk: {text}"
         print(f"Wake word detected! ({source})")
         lights.set_state("wake")
         sys.stdout.flush()
