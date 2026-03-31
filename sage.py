@@ -67,7 +67,7 @@ def ask_claude(question):
         if len(claude_history) > CLAUDE_MAX_HISTORY * 2:
             claude_history[:] = claude_history[-CLAUDE_MAX_HISTORY * 2:]
         response = claude_client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-3-5-haiku-20241022",
             max_tokens=300,
             system="You are Claude, a friendly voice assistant in a family kitchen. Keep responses short and conversational — they will be spoken aloud. The family includes Britta, Ian, Bailey, and Adelle. There's also a dog named Ellie. You share the device with Sage, the local assistant who handles timers, weather, and reminders. You handle everything else — questions, conversation, homework help, recipes, advice. Be warm, helpful, and concise.",
             messages=claude_history
@@ -930,7 +930,7 @@ def bedtime_scheduler():
         is_weekend = weekday in [4, 5]  # Fri/Sat night
 
         # Auto-bedtime (disabled during development)
-        if False and not bedtime_mode.is_set():
+        if not bedtime_mode.is_set():
             if is_weekend and hour == 22 and minute == 30:
                 speak("It's 10:30. Goodnight everyone.")
                 enter_bedtime()
@@ -1441,7 +1441,9 @@ def handle_command(text):
     timer_check = False
     if "time" in text and ("left" in text or "remain" in text or "how much" in text or "how long" in text):
         timer_check = True
-    if "timer" in text and ("running" in text or "active" in text or "going" in text or "how many" in text):
+    if "timer" in text and ("running" in text or "active" in text or "going" in text or "how many" in text
+                            or "check" in text or "status" in text or "how much" in text
+                            or "on the" in text or "on my" in text):
         timer_check = True
     if "what timer" in text or "any timer" in text:
         timer_check = True
