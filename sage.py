@@ -27,9 +27,7 @@ from pathlib import Path
 import urllib.request
 import base64
 from dateutil import tz
-from vosk import Model, KaldiRecognizer, SetLogLevel
 from sage_lights import lights
-SetLogLevel(-1)
 
 # ── Max volume at startup ────────────────────────────────────────────────────
 # Volume set after device detection below
@@ -67,7 +65,7 @@ def ask_claude(question):
         if len(claude_history) > CLAUDE_MAX_HISTORY * 2:
             claude_history[:] = claude_history[-CLAUDE_MAX_HISTORY * 2:]
         response = claude_client.messages.create(
-            model="claude-3-5-haiku-20241022",
+            model="claude-haiku-4-5-20251001",
             max_tokens=300,
             system="You are Claude, a friendly voice assistant in a family kitchen. Keep responses short and conversational — they will be spoken aloud. The family includes Britta, Ian, Bailey, and Adelle. There's also a dog named Ellie. You share the device with Sage, the local assistant who handles timers, weather, and reminders. You handle everything else — questions, conversation, homework help, recipes, advice. Be warm, helpful, and concise.",
             messages=claude_history
@@ -284,7 +282,16 @@ if _os.path.exists(_pulse_socket):
     SPEAKER_DEVICE = "pulse"
     MIC_HW_DEVICE = "pulse"
     _os.environ.setdefault("PULSE_SERVER", f"unix:{_pulse_socket}")
-    print(f"PulseAudio active — routing audio through pulse (AEC enabled)", flush=True)
+    # Verify WebRTC AEC module is loaded (echocancel_source should exist)
+    _aec_check = subprocess.run(
+        ["pactl", "list", "sources", "short"],
+        capture_output=True, text=True, timeout=5
+    )
+    _aec_active = "echocancel_source" in _aec_check.stdout
+    if _aec_active:
+        print("PulseAudio active — WebRTC AEC enabled (echocancel_source)", flush=True)
+    else:
+        print("WARNING: PulseAudio active but AEC module not loaded — echo cancellation disabled", flush=True)
 else:
     print("PulseAudio not available — using ALSA direct", flush=True)
 
@@ -459,7 +466,7 @@ def play_thinking_chime():
     _play_raw(s)
 
 # ── Whisper command listener ─────────────────────────────────────────────────
-def whisper_listen(max_seconds=6.5, spoken_prompt=None, silent=False, sensitivity=1.8):
+def whisper_listen(max_seconds=6.5, spoken_prompt=None, silent=False, sensitivity=1.5, skip_threshold=False):
     """Play chime, record with silence detection, then transcribe with Faster Whisper."""
     import wave
     wav_path = "/tmp/sage_cmd.wav"
@@ -485,6 +492,11 @@ def whisper_listen(max_seconds=6.5, spoken_prompt=None, silent=False, sensitivit
     elif not silent:
         play_chime()
     lights.set_state("listening")
+
+    # Brief pause after Sage speaks — lets reverb clear so baseline calibration
+    # doesn't pick up Sage's own voice and inflate the threshold.
+    if spoken_prompt:
+        time.sleep(0.3)
 
     # Start raw recording
     rec_proc = subprocess.Popen(
@@ -512,6 +524,11 @@ def whisper_listen(max_seconds=6.5, spoken_prompt=None, silent=False, sensitivit
         chunk_count += 1
 
     baseline = sum(baseline_energies) / max(len(baseline_energies), 1)
+    # Cap baseline — if it's above 500, Sage's own voice or AEC residue inflated it.
+    # Normal quiet room baseline is 70-300. Capping prevents impossible thresholds.
+    if baseline > 500:
+        print(f"Baseline capped: {baseline:.0f} -> 500 (was inflated)", flush=True)
+        baseline = 500
     threshold = baseline * sensitivity  # adjustable speech detection sensitivity
 
     for _ in range(max_chunks - chunk_count):
@@ -537,8 +554,9 @@ def whisper_listen(max_seconds=6.5, spoken_prompt=None, silent=False, sensitivit
         return ""
 
     # If nothing crossed the speech threshold, don't transcribe — prevents
-    # Whisper from hallucinating text out of TV/fan background noise
-    if not speech_started:
+    # Whisper from hallucinating text out of TV/fan background noise.
+    # Skip this check when Sage is already in conversation (user is actively talking).
+    if not speech_started and not skip_threshold:
         print("No speech detected (below threshold), skipping transcription", flush=True)
         return ""
 
@@ -606,6 +624,8 @@ def whisper_check_stop():
     """Record 3 seconds via arecord, transcribe with faster-whisper, return True if dismissal heard."""
     import wave
     wav_path = "/tmp/sage_stop.wav"
+    # Brief pause after "say stop to silence" so Sage's own voice clears
+    time.sleep(0.3)
     rec = subprocess.run(
         ["arecord", "-D", MIC_HW_DEVICE, "-f", "S16_LE", "-r", "16000",
          "-c", "1", "-d", "3", wav_path],
@@ -614,6 +634,15 @@ def whisper_check_stop():
     if rec.returncode != 0:
         print(f"whisper_check_stop arecord failed: {rec.stderr.decode(errors='replace').strip()}", flush=True)
         return False
+    # Check if recording has actual audio (not silence from AEC)
+    try:
+        with wave.open(wav_path, 'rb') as wf:
+            raw = wf.readframes(wf.getnframes())
+            samples = np.frombuffer(raw, dtype=np.int16)
+            rms = int(np.sqrt(np.mean(samples.astype(np.float32) ** 2)))
+            print(f"Alarm listen rms: {rms}", flush=True)
+    except Exception:
+        pass
     try:
         segments, _ = whisper_model.transcribe(wav_path, beam_size=1, language="en")
         text = " ".join([s.text.strip() for s in segments]).strip().lower()
@@ -1132,7 +1161,7 @@ def update_checker():
                 pip_lines = [l for l in pip_result.stdout.strip().splitlines()
                              if l and "Package" not in l and "---" not in l]
                 # Filter to packages we care about
-                sage_deps = ["vosk", "faster-whisper", "spotipy", "pyaudio",
+                sage_deps = ["faster-whisper", "spotipy", "pyaudio",
                              "icalendar", "python-dateutil"]
                 outdated = []
                 for line in pip_lines:
@@ -1474,7 +1503,7 @@ def handle_command(text):
             time_str = f"{hour} {minute} {ampm}"
         speak(f"It's {time_str}. Is there anything else I can help with?")
         # Active listening for follow-up command
-        followup = whisper_listen(max_seconds=5, silent=True, sensitivity=1.2)
+        followup = whisper_listen(max_seconds=5, silent=True, skip_threshold=True)
         if followup and followup.strip() and "[blank" not in followup.lower():
             followup_lower = followup.lower().strip()
             # Dismiss phrases - just return to idle
@@ -1815,7 +1844,7 @@ def handle_command(text):
         family = ["Britta", "Ian", "Bailey", "Adelle"]
         guess = random.choice(family)
         speak(f"I spy with my little eye... you are {guess}! Am I right?")
-        answer_text = whisper_listen(max_seconds=4)
+        answer_text = whisper_listen(max_seconds=4, skip_threshold=True)
         answer = answer_text.lower() if answer_text else ""
         print(f"Who am I answer: {answer}", flush=True)
         if any(w in answer for w in ["yes", "yeah", "yep", "correct", "right", "that's me"]):
@@ -1945,7 +1974,7 @@ def handle_command(text):
             speak("I could not get the full system status.")
             return
         # Active listening for follow-up command
-        followup = whisper_listen(max_seconds=5, silent=True, sensitivity=1.2)
+        followup = whisper_listen(max_seconds=5, silent=True, skip_threshold=True)
         if followup and followup.strip() and "[blank" not in followup.lower():
             followup_lower = followup.lower().strip()
             if any(w in followup_lower for w in ["no", "nope", "that is all",
@@ -2039,13 +2068,6 @@ def handle_command(text):
 
 # ── Audio setup ──────────────────────────────────────────────────────────────
 MIC_RATE = 16000      # Jabra SPEAK 510 native rate
-VOSK_RATE = 16000    # what the Vosk model expects
-
-model = Model("/home/sage/vosk-model-en-us-0.22-lgraph")
-
-# Initialize wake word audio buffer
-
-
 
 # ── Voice profiles for speaker identification ────────────────────────────────
 voice_profiles = {}
@@ -2056,8 +2078,6 @@ try:
     print(f"Loaded voice profiles: {list(voice_profiles.keys())}", flush=True)
 except Exception as e:
     print(f"Voice profiles not loaded: {e}", flush=True)
-
-rec = KaldiRecognizer(model, VOSK_RATE)
 
 
 # ── MFCC Wake Word Detector v4 ────────────────────────────────────────────────
@@ -2143,12 +2163,12 @@ def _ww_extract_features(samples_int16, sr=16000, num_mfcc=13, num_filters=26, f
 # Load MFCC wake word model
 _ww_session = None
 _ww_input_name = None
-WW_THRESHOLD = 0.92
+WW_THRESHOLD = 0.67
 WW_COOLDOWN = 5  # seconds between triggers
 try:
-    _ww_session = _ww_ort.InferenceSession("/home/sage/hey_sage_mfcc_v5.onnx")
+    _ww_session = _ww_ort.InferenceSession("/home/sage/hey_sage_mfcc_v6.onnx")
     _ww_input_name = _ww_session.get_inputs()[0].name
-    print("MFCC wake word v5 loaded (hey_sage_mfcc_v5.onnx)", flush=True)
+    print("MFCC wake word v6 loaded (hey_sage_mfcc_v6.onnx)", flush=True)
 except Exception as e:
     print(f"Wake word model not loaded: {e}", flush=True)
 
@@ -2196,21 +2216,11 @@ CLAUDE_INVOKE_PHRASES = [
 # Whisper mishearings of "claude" — the name alone in a command is enough to route
 CLAUDE_NAME_VARIANTS = ["claude", "claud", "clawed"]
 
-WAKE_WORDS = [
-    # Direct
-    "sage", "hey sage",
-    # Observed Vosk mishearings in this kitchen (from live logs)
-    "hey say", "a say", "his age", "if age", "a stage",
-    "hey suit", "who suit", "ice age", "hey age", "hey page",
-    "the sage", "a sage", "hey face", "hey space",
-    "they say", "hey stage", "hate sage", "hey sag",
-    "thieves",
-]
 
 # ── Claude conversation mode — entered via command after Sage wakes ───────────
 def enter_claude_mode():
     """Start a Claude conversation. Closes and reopens the mic stream internally."""
-    global stream, rec
+    global stream
     speak(random.choice([
         "Sure, let me get Claude. One moment.",
         "Sure thing, pulling up Claude now.",
@@ -2232,7 +2242,7 @@ def enter_claude_mode():
         "Claude here, what's on your mind?",
     ]))
     while in_conversation:
-        command = whisper_listen(max_seconds=10)
+        command = whisper_listen(max_seconds=10, skip_threshold=True)
         if not command or command.strip() == "" or "[blank" in command.lower():
             if time.time() - last_activity > CLAUDE_IDLE_TIMEOUT:
                 speak_claude("Alright, I'll let you go.")
@@ -2284,7 +2294,6 @@ def enter_claude_mode():
     lights.set_state("idle")
     stream = p.open(format=pyaudio.paInt16, channels=1, rate=MIC_RATE,
                     input=True, input_device_index=MIC_DEVICE_INDEX, frames_per_buffer=8192)
-    rec.Reset()
     whisper_listen._rms_window = []
 
 
@@ -2346,10 +2355,10 @@ while True:
             input_device_index=MIC_DEVICE_INDEX,
             frames_per_buffer=8192
         )
-        rec.Reset()
+
         continue
 
-    # Skip Vosk during alarm (chime playing)
+    # Skip wake word detection during alarm (chime playing)
     if alarm_playing.is_set():
         try:
             data_raw = stream.read(4096, exception_on_overflow=False)  # drain buffer
@@ -2366,7 +2375,7 @@ while True:
     if len(whisper_listen._rms_window) > 10:
         whisper_listen._rms_window.pop(0)
     rms_peak = max(whisper_listen._rms_window)
-    data = data_raw  # MIC_RATE == VOSK_RATE, no conversion needed
+    data = data_raw
 
     # ── MFCC wake word check (every ~0.5s = every 2 chunks) ────────────
     ww_detected = False
@@ -2392,24 +2401,37 @@ while True:
         except Exception as e:
             print(f"Wake word error: {e}", flush=True)
 
-    vosk_detected = False
-    if not hasattr(whisper_listen, '_vosk_last_trigger'):
-        whisper_listen._vosk_last_trigger = 0
-    if rec.AcceptWaveform(data):
-        result = json.loads(rec.Result())
-        text = result.get("text", "")
-        if text and (len(text.split()) > 1 or any(w in text.lower() for w in WAKE_WORDS)):
-            print(f"Heard: {text} (energy: {rms})")
-            sys.stdout.flush()
-        if any(w in text.lower() for w in WAKE_WORDS):
-            vosk_detected = True
-            whisper_listen._vosk_last_trigger = time.time()
-
-
-    # Wake word — MFCC primary, Vosk fallback
-    _wake_confirmed = ww_detected or (vosk_detected and rms_peak > RMS_GATE)
+    # Wake word — MFCC only (Whisper verifies inside the block below)
+    _wake_confirmed = ww_detected
     if _wake_confirmed:
-        source = f"MFCC: {ww_prob:.3f}" if ww_detected else f"Vosk: {text}"
+        source = f"MFCC: {ww_prob:.3f}"
+
+        # ── Two-stage verification: Whisper confirms "sage" in the buffer ──
+        # MFCC triggers on spectral patterns but can't distinguish words.
+        # Transcribe the 2s wake buffer with Whisper and reject if "sage" isn't there.
+        if ww_detected:
+            import tempfile, wave as _ww_wave
+            _verify_path = "/tmp/sage_ww_verify.wav"
+            with _ww_wave.open(_verify_path, "wb") as _vwf:
+                _vwf.setnchannels(1)
+                _vwf.setsampwidth(2)
+                _vwf.setframerate(16000)
+                _vwf.writeframes(_ww_audio_buffer.tobytes())
+            try:
+                _segs, _ = whisper_model.transcribe(_verify_path, language="en",
+                    beam_size=1, best_of=1, vad_filter=False)
+                _ww_text = " ".join(s.text for s in _segs).strip().lower()
+                # Check for "sage" or common Whisper mishearings of it
+                _sage_variants = ["sage", "say", "saige", "saje", "sag", "safe",
+                                  "stage", "page", "saved", "hey sage"]
+                _ww_verified = any(v in _ww_text for v in _sage_variants)
+                print(f"Wake verify: '{_ww_text}' -> {'CONFIRMED' if _ww_verified else 'REJECTED'}", flush=True)
+                if not _ww_verified:
+                    print(f"MFCC false positive rejected (heard: '{_ww_text}')", flush=True)
+                    continue
+            except Exception as e:
+                print(f"Wake verify error: {e} — accepting MFCC trigger", flush=True)
+
         print(f"Wake word detected! ({source})")
         lights.set_state("wake")
         sys.stdout.flush()
@@ -2423,7 +2445,7 @@ while True:
             "Sage here, what's up?",
             "This is Sage, I'm listening.",
         ])
-        command = whisper_listen(spoken_prompt=greeting)
+        command = whisper_listen(spoken_prompt=greeting, skip_threshold=True)
         _dismiss_words = ("never mind", "nevermind", "cancel", "nothing",
                           "forget it", "false alarm", "sorry", "no", "nope",
                           "go away", "stop listening", "dismiss")
@@ -2451,7 +2473,7 @@ while True:
         except Exception as e:
             print(f"Error: {e}", flush=True)
         lights.set_state("idle")
-        # Reopen the mic stream for Vosk wake word detection
+        # Reopen the mic stream for wake word detection
         stream = p.open(
             format=pyaudio.paInt16,
             channels=1,
@@ -2460,7 +2482,7 @@ while True:
             input_device_index=MIC_DEVICE_INDEX,
             frames_per_buffer=8192
         )
-        rec.Reset()
+
         whisper_listen._rms_window = []  # clear stale rms_peak after recording session
 
 # Built by Britta Seisums Davis / ohgollybritta

@@ -67,6 +67,7 @@ A **USB conference speakerphone** like the **Jabra SPEAK 510** is optional but h
 - 🤖 **Voice chat with Claude** — "Hey Claude, what's a good recipe for banana bread?"
 - 🤖 **Conversation mode** — back-and-forth conversation, no need to repeat the wake word
 - 🤖 **Smart handoff** — ask Claude to set a timer and it seamlessly passes to Sage
+- 🤖 Uses Claude Haiku 4.5 — fast, lightweight, and affordable for voice conversations
 - 🤖 Requires an [Anthropic API key](https://console.anthropic.com) — completely optional
 
 ### Time & Date
@@ -162,14 +163,7 @@ sudo apt update && sudo apt upgrade -y
 
 ```bash
 sudo apt install -y python3-pip python3-pyaudio git cmake
-pip3 install vosk faster-whisper spotipy python-dateutil icalendar onnxruntime --break-system-packages
-```
-
-### 5. Install Vosk model (wake word detection)
-
-```bash
-wget https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip
-unzip vosk-model-small-en-us-0.15.zip
+pip3 install faster-whisper spotipy python-dateutil icalendar onnxruntime --break-system-packages
 ```
 
 ### 6. Install Piper (local text-to-speech)
@@ -494,13 +488,13 @@ sudo ufw --force enable
 
 ### 12. Wake word tuning
 
-Wake word detection uses a **dual-detector** approach:
+Wake word detection uses a **two-stage** approach:
 
-1. **MFCC wake word model** (primary) — a custom GradientBoosting classifier trained on temporal MFCC features. Extracts 362-dimensional feature vectors from 2-second audio clips, dividing frames into 8 temporal segments to preserve *when* sounds happen, not just what. Exported as an ONNX model (`hey_sage_mfcc_v5.onnx`). Runs inference every 2 audio chunks when audio energy exceeds the RMS gate.
+1. **MFCC wake word model** — a custom GradientBoosting classifier trained on temporal MFCC features. Extracts 362-dimensional feature vectors from 2-second audio clips, dividing frames into 8 temporal segments to preserve *when* sounds happen, not just what. Exported as an ONNX model (`hey_sage_mfcc_v6.onnx`). Runs inference every 2 audio chunks when audio energy exceeds the RMS gate.
 
-2. **Vosk** (fallback) — local speech recognition that listens for "hey sage" and common mishearings ("they sage", "hey stage"). Always running as a safety net.
+2. **Whisper verification** — when the MFCC model triggers, the 2-second audio buffer is transcribed by Faster Whisper to confirm "sage" was actually spoken. This eliminates false positives from music, TV, or ambient speech.
 
-Either detector can trigger the wake word. Both run entirely on-device.
+Both stages run entirely on-device.
 
 #### Tuning sensitivity
 
@@ -515,7 +509,7 @@ Either detector can trigger the wake word. Both run entirely on-device.
 ## How it works
 
 ```
-Wake word detection (MFCC model + Vosk fallback)
+Wake word detection (MFCC model + Whisper verification)
               |
      "Hey Sage" detected → Chime → Record audio
               |                         |
@@ -551,6 +545,8 @@ All speech processing happens on-device. Outbound network traffic is limited to:
 | "Chicken nuggets" | Preset timer (13 min) |
 | "What timers are running?" | Lists active timers |
 | "How much time is left?" | Time remaining on timers |
+| "How much time on the timer?" | Time remaining on timers |
+| "Check the timer" | Time remaining on timers |
 | "Stop" / "Stop the timer" | Dismisses ringing alarm |
 | "Cancel all timers" | Cancels pending timers |
 | "Cancel all reminders" | Cancels pending reminders |
@@ -622,10 +618,10 @@ Soldering required to attach jumper wires to the LED ring pads (PWR, GND, DIN). 
 ## Troubleshooting
 
 **Wake word not triggering**
-- Sage uses dual detection: MFCC model (primary) + Vosk (fallback)
+- Sage uses two-stage detection: MFCC model triggers, then Whisper verifies "sage" was spoken
 - The MFCC model requires sufficient audio energy (`RMS_GATE * 2`) and buffer energy (`_buf_rms > 150`) to run inference
 - Lower `DAYTIME_RMS_GATE` in `sage.py` if Sage consistently misses you (default: 80)
-- Lower `WW_THRESHOLD` (default: 0.92) if the MFCC model isn't triggering — but too low causes false positives
+- Lower `WW_THRESHOLD` (default: 0.67) if the MFCC model isn't triggering — but too low causes false positives
 - Move the mic away from the Pi's fan if possible (USB extension cable helps)
 
 **Whisper recognition is poor**
@@ -678,9 +674,9 @@ Soldering required to attach jumper wires to the LED ring pads (PWR, GND, DIN). 
 
 ## Privacy
 
-- Voice is processed by [Vosk](https://alphacephei.com/vosk/) and [Faster Whisper](https://github.com/SYSTRAN/faster-whisper) running locally on the Pi
+- Voice is processed by [Faster Whisper](https://github.com/SYSTRAN/faster-whisper) running locally on the Pi
 - Text-to-speech is handled by [Piper](https://github.com/rhasspy/piper) running locally on the Pi
-- Wake word detection uses a custom MFCC model (ONNX) + [Vosk](https://alphacephei.com/vosk/) fallback, both running locally
+- Wake word detection uses a custom MFCC model (ONNX) with Whisper verification, both running locally
 - No audio is ever sent to an external server or stored
 - Claude AI chat is **opt-in** — only activates when you say "Hey Claude" and requires your own API key
 - Internet is used only for: Spotify, weather (Open-Meteo), calendar (iCal), push notifications (ntfy), and Claude API
