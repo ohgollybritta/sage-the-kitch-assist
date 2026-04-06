@@ -234,6 +234,84 @@ except Exception as e:
     print(f"Spotify not available: {e}", flush=True)
     sp = None
 
+# ── Spotify device management (persistent, survives reboots) ────────────────
+_SPOTIFY_DEVICE_CACHE = Path.home() / ".sage_spotify_device"
+_spotify_device_id = None
+
+def _load_cached_device():
+    """Load device ID from disk — survives reboots."""
+    global _spotify_device_id
+    try:
+        if _SPOTIFY_DEVICE_CACHE.exists():
+            _spotify_device_id = _SPOTIFY_DEVICE_CACHE.read_text().strip()
+            if _spotify_device_id:
+                print(f"Loaded cached Spotify device: {_spotify_device_id[:12]}...", flush=True)
+    except Exception:
+        pass
+
+def _save_device(device_id):
+    """Persist device ID to disk."""
+    global _spotify_device_id
+    _spotify_device_id = device_id
+    try:
+        _SPOTIFY_DEVICE_CACHE.write_text(device_id)
+    except Exception:
+        pass
+
+def _get_spotify_device(retries=3):
+    """Discover Sage's Spotify Connect device by name."""
+    for attempt in range(retries):
+        try:
+            devices = sp.devices()["devices"]
+            for d in devices:
+                if "sage" in d.get("name", "").lower():
+                    _save_device(d["id"])
+                    return d["id"]
+            if devices:
+                _save_device(devices[0]["id"])
+                return devices[0]["id"]
+        except Exception as e:
+            print(f"Device list attempt {attempt+1} failed: {e}", flush=True)
+        if attempt < retries - 1:
+            time.sleep(2)
+    return None
+
+def _ensure_spotify_device():
+    """Get device — try cached ID, then discover, then restart raspotify with polling."""
+    global _spotify_device_id
+    # 1. Quick discovery
+    dev = _get_spotify_device(retries=2)
+    if dev:
+        return dev
+    # 2. Try cached ID from disk (persists across reboots)
+    if _spotify_device_id:
+        print(f"Trying cached Spotify device...", flush=True)
+        try:
+            sp.transfer_playback(_spotify_device_id, force_play=False)
+            time.sleep(2)
+            # Verify it worked
+            dev = _get_spotify_device(retries=1)
+            if dev:
+                return dev
+            return _spotify_device_id  # trust the cache
+        except Exception as e:
+            print(f"Cached device failed: {e}", flush=True)
+            _spotify_device_id = None
+    # 3. Restart raspotify and poll for device (not fixed sleep)
+    print("Restarting raspotify...", flush=True)
+    subprocess.run(["sudo", "systemctl", "restart", "raspotify"], timeout=10)
+    for wait in range(15):  # poll every 2s for up to 30s
+        time.sleep(2)
+        dev = _get_spotify_device(retries=1)
+        if dev:
+            print(f"Raspotify reconnected after {(wait+1)*2}s: {dev[:12]}...", flush=True)
+            return dev
+    print("ERROR: Could not find Spotify device after 30s", flush=True)
+    return None
+
+# Load cached device on startup
+_load_cached_device()
+
 # ── Text-to-speech ───────────────────────────────────────────────────────────
 PIPER_DIR = "/home/sage/piper"
 VOICE_MODEL        = "/home/sage/piper-voices/en_GB-northern_english_male-medium.onnx"  # Sage — Northern British male
@@ -1579,54 +1657,6 @@ def handle_command(text):
 
     if _is_spotify_play or _is_spotify_ctrl or _is_spotify_music:
 
-        _cached_device_id = None
-
-        def _get_device(retries=3):
-            """Discover Sage's Spotify Connect device by name."""
-            nonlocal _cached_device_id
-            for attempt in range(retries):
-                try:
-                    devices = sp.devices()["devices"]
-                    for d in devices:
-                        if "sage" in d.get("name", "").lower():
-                            _cached_device_id = d["id"]
-                            return d["id"]
-                    if devices:
-                        _cached_device_id = devices[0]["id"]
-                        return devices[0]["id"]
-                except Exception as e:
-                    print(f"Device list attempt {attempt+1} failed: {e}", flush=True)
-                if attempt < retries - 1:
-                    time.sleep(2)
-            return None
-
-        def _ensure_device():
-            """Get device, restart raspotify if needed. No hardcoded IDs."""
-            nonlocal _cached_device_id
-            dev = _get_device(retries=2)
-            if dev:
-                return dev
-            # Try cached ID from last successful lookup
-            if _cached_device_id:
-                print(f"No device in list, trying cached ID...", flush=True)
-                try:
-                    sp.transfer_playback(_cached_device_id, force_play=False)
-                    time.sleep(2)
-                    return _cached_device_id
-                except Exception as e:
-                    print(f"Cached ID failed: {e}", flush=True)
-                    _cached_device_id = None
-            # Last resort: restart raspotify and wait for it to register
-            print("Restarting raspotify...", flush=True)
-            subprocess.run(["sudo", "systemctl", "restart", "raspotify"], timeout=10)
-            time.sleep(8)  # raspotify needs time to connect to Spotify
-            dev = _get_device(retries=5)
-            if dev:
-                print(f"Raspotify reconnected: {dev}", flush=True)
-                return dev
-            print("ERROR: Could not find Spotify device after restart", flush=True)
-            return None
-
         try:
             # Pause / stop music
             if "pause" in text or "stop the music" in text or "stop music" in text or "mute" in text:
@@ -1636,7 +1666,7 @@ def handle_command(text):
 
             # Resume
             if text.strip() in ("resume", "resume music", "resume playback", "unpause"):
-                dev = _ensure_device()
+                dev = _ensure_spotify_device()
                 if dev:
                     sp.start_playback(device_id=dev)
                     speak("Resuming")
@@ -1701,7 +1731,7 @@ def handle_command(text):
             query = query.strip().strip(".")
 
             if not query or query in ("music", "something", "some music", "songs", "spotify", "my music", "my songs"):
-                dev = _ensure_device()
+                dev = _ensure_spotify_device()
                 if dev:
                     # Try resuming first
                     try:
@@ -1731,7 +1761,7 @@ def handle_command(text):
                     speak("I can't find the speaker right now.")
                 return
 
-            dev = _ensure_device()
+            dev = _ensure_spotify_device()
             if not dev:
                 speak("I can't find the Sage speaker. Give me a moment and try again.")
                 return
@@ -1801,7 +1831,7 @@ def handle_command(text):
                 import time as _time
                 _time.sleep(2)
                 try:
-                    dev = _ensure_device()
+                    dev = _ensure_spotify_device()
                     if dev:
                         sp.start_playback(device_id=dev)
                         speak("Had a hiccup, but music should be playing now.")
