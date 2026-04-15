@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <link rel="icon" type="image/x-icon" href="/favicon.ico">
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sage — Oh golly, Britta!</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..900;1,9..144,300..900&family=DM+Sans:ital,opsz,wght@0,9..40,300..700;1,9..40,300..700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/styles.css">
+<link rel="stylesheet" href="/css/nav.css">
+  <link rel="stylesheet" href="/css/bgp.css">
+    <style>
+/* Feature cards */
+    .sage-feature-grid {
+      display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; margin-top: 32px;
+    }
+    @media (max-width: 860px) { .sage-feature-grid { grid-template-columns: 1fr 1fr; } }
+    @media (max-width: 540px) { .sage-feature-grid { grid-template-columns: 1fr; } }
+    .sage-feature {
+      background: var(--terra-dark);
+      border: 1px solid rgba(245,237,228,.07);
+      border-radius: 4px; padding: 28px 26px; position: relative; overflow: hidden;
+    }
+    .sage-feature::before {
+      content: ''; position: absolute; top: 0; left: 0; right: 0;
+      height: 3px; background: var(--teal-light);
+    }
+    .sage-feature-icon {
+      font-size: 22px; margin-bottom: 14px; display: block;
+    }
+    .sage-feature-name {
+      font-family: 'Fraunces', serif; font-size: 17px; font-weight: 800;
+      color: var(--cream); margin-bottom: 10px; line-height: 1.2;
+    }
+    .sage-feature-desc {
+      font-size: 13px; color: rgba(245,237,228,.55); line-height: 1.7;
+    }
+
+    /* GitHub coming-soon notice */
+    .sage-github-notice {
+      display: flex; align-items: center; gap: 18px;
+      background: rgba(61,154,139,.06);
+      border: 1px solid rgba(61,154,139,.18);
+      border-radius: 4px; padding: 22px 28px; margin-top: 32px;
+    }
+    .sage-github-icon {
+      flex-shrink: 0; color: var(--teal-light); opacity: .7;
+    }
+    .sage-github-text {
+      font-size: 14px; color: rgba(245,237,228,.55); line-height: 1.65;
+    }
+    .sage-github-text strong { color: rgba(245,237,228,.8); font-weight: 600; }
+  </style>
+</head>
+<body>
+
+<nav>
+  <ul class="nav-links">
+    <li><a href="/work.html">Work</a></li>
+    <li><a href="/about.html">About</a></li>
+    <li><a href="/contact.html">Contact</a></li>
+  </ul>
+  <a href="/index.html" class="nav-brand">oh golly britta</a>
+  <div class="nav-icons">
+    <a href="https://instagram.com/ohgollybritta" title="Instagram" target="_blank">
+      <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="20" rx="5"/><circle cx="12" cy="12" r="4"/><circle cx="17.5" cy="6.5" r="0.8" fill="currentColor" stroke="none"/></svg>
+    </a>
+    <a href="https://github.com/ohgollybritta" title="GitHub" target="_blank">
+      <svg width="19" height="19" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"/></svg>
+    </a>
+    <a href="https://www.twitch.tv/ohgollybritta" title="Twitch" target="_blank">
+      <svg width="19" height="19" viewBox="0 0 24 24" fill="currentColor"><path d="M11.571 4.714h1.715v5.143H11.57zm4.715 0H18v5.143h-1.714zM6 0L1.714 4.286v15.428h5.143V24l4.286-4.286h3.428L22.286 12V0zm14.571 11.143l-3.428 3.428h-3.429l-3 3v-3H6.857V1.714h13.714z"/></svg>
+    </a>
+    <a href="https://app.hackthebox.com/users/3168721" title="HackTheBox" target="_blank">
+      <svg width="19" height="19" viewBox="8 8 16 16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linejoin="round">
+        <polygon points="16,8.5 22,12 16,15.5 10,12"/>
+        <polyline points="10,12 10,19.5 16,23 16,15.5"/>
+        <polyline points="22,12 22,19.5 16,23"/>
+      </svg>
+    </a>
+  </div>
+  <button class="nav-hamburger" aria-label="Open menu" aria-expanded="false">
+    <span></span><span></span><span></span>
+  </button>
+  <div class="nav-mobile-menu" id="nav-mobile-menu">
+    <ul>
+      <li><a href="/work.html">Work</a></li>
+      <li><a href="/about.html">About</a></li>
+      <li><a href="/contact.html">Contact</a></li>
+    </ul>
+  </div>
+</nav>
+
+<!-- ── HERO ── -->
+<div class="project-hero">
+  <img class="project-hero-img" src="/img/sage-card.jpg" alt="Sage" style="object-position: center center;">
+  <div class="hero-gradient"></div>
+  <div class="project-hero-content">
+    <a href="/recent-project.html" class="project-back">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 5l-7 7 7 7"/></svg>
+      &nbsp;Back
+    </a>
+    <div class="project-eyebrow">
+      <span class="project-cat">Open Source · Privacy</span>
+      <div class="project-eyebrow-dot"></div>
+      <span class="project-year">2026 – Present</span>
+    </div>
+    <h1 class="project-hero-title">Sage</h1>
+    <div class="project-hero-meta">
+      <div class="hero-meta-item">
+        <div class="hero-meta-label">Platform</div>
+        <div class="hero-meta-value">Raspberry Pi</div>
+      </div>
+      <div class="hero-meta-divider"></div>
+      <div class="hero-meta-item">
+        <div class="hero-meta-label">Language</div>
+        <div class="hero-meta-value">Python</div>
+      </div>
+      <div class="hero-meta-divider"></div>
+      <div class="hero-meta-item">
+        <div class="hero-meta-label">Status</div>
+        <div class="hero-meta-value">v2.0.0 Released</div>
+      </div>
+      <div class="hero-meta-divider"></div>
+      <div class="hero-meta-item">
+        <div class="hero-meta-label">Audio to Cloud</div>
+        <div class="hero-meta-value">Never</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── CASE STUDY BODY ── -->
+<div class="case-study">
+
+  <!-- OVERVIEW STRIP -->
+  <div class="cs-overview">
+    <div class="cs-overview-item">
+      <div class="cs-overview-label">Hardware</div>
+      <div class="cs-overview-value">Raspberry <em>Pi</em></div>
+    </div>
+    <div class="cs-overview-item">
+      <div class="cs-overview-label">Language</div>
+      <div class="cs-overview-value">Python</div>
+    </div>
+    <div class="cs-overview-item">
+      <div class="cs-overview-label">Cloud Audio</div>
+      <div class="cs-overview-value"><em>Zero</em> storage</div>
+    </div>
+    <div class="cs-overview-item">
+      <div class="cs-overview-label">Source Code</div>
+      <div class="cs-overview-value">Open Source <em>on GitHub</em></div>
+    </div>
+  </div>
+
+  <!-- ── SECTION: THE PROBLEM ── -->
+  <section class="cs-section">
+    <div class="cs-section-label"><span>The Problem</span></div>
+    <div class="cs-two-col wide-left">
+      <div>
+        <h2 class="cs-section-heading">Always listening —<br><em>and always saving.</em></h2>
+        <p class="cs-body">
+          Commercial voice assistants have always sent audio to the cloud for processing — that was the known trade-off from day one. But for a while, some devices offered a middle ground: an opt-out setting that kept certain voice interactions local, never leaving the hardware. That option is gone now. In early 2025, it was quietly removed. The official reason was AI: newer generative features require more processing power than the device itself can provide, so everything goes to the cloud, without exception, and without a way to decline.
+        </p>
+        <p class="cs-body" style="margin-top:16px;">
+          The convenience was never the problem. A voice assistant is genuinely useful for the small, repetitive things — timers, music, reminders. But those tasks don't require a server farm. They never did. The cloud dependency isn't a technical necessity for a kitchen timer. It's a data strategy. "Always-on" and "always uploading" are two different things, and they don't have to come as a package.
+        </p>
+        <div class="cs-pull">
+          <div class="cs-pull-text">"Always-on shouldn't mean<br><em>always uploading.</em>"</div>
+        </div>
+      </div>
+      <div>
+        <div class="messaging-card" style="margin-bottom:20px;">
+          <div class="messaging-card-label">What Changed</div>
+          <div class="messaging-card-text">In early 2025, the last remaining opt-out for local voice processing was removed from major commercial smart speakers. The stated reason was generative AI — new features need the cloud. The effect was that users lost the ability to keep any part of their voice data on-device, with no alternative offered.</div>
+        </div>
+        <div class="messaging-card">
+          <div class="messaging-card-label">The Gap</div>
+          <div class="messaging-card-text">No mainstream voice assistant gives you the full feature set without the cloud dependency. Sage is built to close that gap — doing the everyday things well, without sending a single byte of your voice anywhere.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── SECTION: WHAT IT DOES ── -->
+  <section class="cs-section">
+    <div class="cs-section-label"><span>Features</span></div>
+    <h2 class="cs-section-heading">The things you actually<br><em>use an assistant for.</em></h2>
+    <p class="cs-body">Sage is built around the tasks that make a voice assistant genuinely useful day-to-day — not an AI chatbot, not a smart home hub. Just the practical stuff, done reliably, without the surveillance footprint.</p>
+    <div class="sage-feature-grid">
+      <div class="sage-feature">
+        <span class="sage-feature-icon">🎵</span>
+        <div class="sage-feature-name">Spotify Voice Control</div>
+        <div class="sage-feature-desc">Play, pause, skip, volume, now playing, liked songs shuffle — all via voice, with dynamic device discovery. The audio plays locally; the request stays local.</div>
+      </div>
+      <div class="sage-feature">
+        <span class="sage-feature-icon">⏱</span>
+        <div class="sage-feature-name">Kitchen Timers</div>
+        <div class="sage-feature-desc">Multiple simultaneous named timers, 23 food presets, and persistent alarms. Set them hands-free while cooking and Sage speaks the alerts back to you.</div>
+      </div>
+      <div class="sage-feature">
+        <span class="sage-feature-icon">🔔</span>
+        <div class="sage-feature-name">Voice Reminders</div>
+        <div class="sage-feature-desc">Relative ("in 20 minutes") or time-of-day ("at 3:30 PM") reminders with push notifications via ntfy. No app required, no phone to check.</div>
+      </div>
+      <div class="sage-feature">
+        <span class="sage-feature-icon">👂</span>
+        <div class="sage-feature-name">MFCC Wake Word Detection</div>
+        <div class="sage-feature-desc">Custom temporal MFCC model (362-dim features, GradientBoosting → ONNX) trained on 128 positive clips and 1,800 real ambient negatives. Vosk fallback included.</div>
+      </div>
+      <div class="sage-feature">
+        <span class="sage-feature-icon">🌤</span>
+        <div class="sage-feature-name">Weather &amp; Calendar</div>
+        <div class="sage-feature-desc">Morning briefing with outfit suggestions and Google Calendar integration via iCal. Ask for the day ahead and Sage reads it back to you.</div>
+      </div>
+      <div class="sage-feature">
+        <span class="sage-feature-icon">🤖</span>
+        <div class="sage-feature-name">Claude AI Chat</div>
+        <div class="sage-feature-desc">Optional voice conversation mode with Claude, with smart hand-offs built in. Engage it when you want it; ignore it when you don't.</div>
+      </div>
+      <div class="sage-feature">
+        <span class="sage-feature-icon">💡</span>
+        <div class="sage-feature-name">LED Ring Indicators</div>
+        <div class="sage-feature-desc">Visual feedback via WS2812B LED ring for listening, processing, alarms, and security alerts — useful when hands are full and you can't look at a screen.</div>
+      </div>
+      <div class="sage-feature">
+        <span class="sage-feature-icon">🔒</span>
+        <div class="sage-feature-name">Security &amp; 100% Local Audio</div>
+        <div class="sage-feature-desc">Firewall control, intrusion detection, and CPU temp monitoring with emergency shutdown. Vosk + Faster Whisper + Piper TTS — no audio ever leaves the device.</div>
+      </div>
+      <div class="sage-feature">
+        <span class="sage-feature-icon">🌙</span>
+        <div class="sage-feature-name">Auto Bedtime &amp; Wake</div>
+        <div class="sage-feature-desc">9:30 PM / 10:30 PM bedtime, 6:30 AM / 8:30 AM wake with a full morning briefing. It runs on a schedule so you don't have to remember to ask.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── SECTION: HOW IT'S BUILT ── -->
+  <section class="cs-section">
+    <div class="cs-section-label"><span>Under the Hood</span></div>
+    <div class="cs-two-col">
+      <div>
+        <h2 class="cs-section-heading">Python on a<br><em>Raspberry Pi.</em></h2>
+        <p class="cs-body">
+          Sage runs entirely on a Raspberry Pi in Python. The goal was to build something that lives in the kitchen like a small appliance — always available, never demanding, and completely understandable by anyone who wants to look at the code.
+        </p>
+        <p class="cs-body" style="margin-top:16px;">
+          Keeping it Python-only wasn't just a language preference — it was a constraint that keeps the project readable, accessible, and easy to fork. The entire stack, from wake word detection through command parsing and response, is written in a single language.
+        </p>
+      </div>
+      <div>
+        <div class="cs-deliverable-list" style="margin-top:0;">
+          <div class="cs-deliverable">
+            <div class="deliverable-dot"></div>
+            <div class="deliverable-text"><strong>Hardware</strong> — Raspberry Pi, running headless as a dedicated voice assistant</div>
+          </div>
+          <div class="cs-deliverable">
+            <div class="deliverable-dot"></div>
+            <div class="deliverable-text"><strong>Language</strong> — Python only, no secondary scripts or compiled dependencies</div>
+          </div>
+          <div class="cs-deliverable">
+            <div class="deliverable-dot"></div>
+            <div class="deliverable-text"><strong>Voice pipeline</strong> — local wake word detection, local speech processing; nothing routed through external APIs</div>
+          </div>
+          <div class="cs-deliverable">
+            <div class="deliverable-dot"></div>
+            <div class="deliverable-text"><strong>Internet</strong> — used selectively, only for outbound service calls like Spotify that require it by nature</div>
+          </div>
+          <div class="cs-deliverable">
+            <div class="deliverable-dot"></div>
+            <div class="deliverable-text"><strong>Status</strong> — v2.0.0 released publicly on GitHub; open source and free to fork</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── SECTION: OPEN SOURCE ── -->
+  <section class="cs-section">
+    <div class="cs-section-label"><span>Open Source</span></div>
+    <h2 class="cs-section-heading">Built in the open.<br><em>Now live on GitHub.</em></h2>
+    <p class="cs-body">The whole point of Sage is that you can see exactly what it does and doesn't do with your voice. Closed-source privacy claims are just claims. Open source is a receipt.</p>
+    <p class="cs-body" style="margin-top:16px;">Sage v2.0.0 is publicly released and free to use, fork, and adapt. If you have a Raspberry Pi and a reason to distrust your smart speaker, the setup is designed to be approachable. The code is all there.</p>
+    <div class="sage-github-notice" style="background:rgba(61,154,139,.1); border-color:rgba(61,154,139,.3);">
+      <div class="sage-github-icon" style="opacity:1;">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"/></svg>
+      </div>
+      <div class="sage-github-text" style="flex:1;">
+        <strong>Sage v2.0.0 is live.</strong> Privacy-first kitchen voice assistant — MFCC wake word detection, Spotify, timers, reminders, weather, Claude AI chat, LED feedback, and a fully local voice pipeline. Free to use, fork, and adapt.
+        <div style="margin-top:14px; display:flex; gap:12px; flex-wrap:wrap;">
+          <a href="https://github.com/ohgollybritta/sage-the-kitch-assist" target="_blank" style="display:inline-flex;align-items:center;gap:7px;background:var(--teal-light);color:var(--ink);font-family:'DM Sans',sans-serif;font-size:12px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;text-decoration:none;padding:9px 18px;border-radius:3px;">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"/></svg>
+            View on GitHub
+          </a>
+          <a href="https://github.com/ohgollybritta/sage-the-kitch-assist/releases/tag/v2.0.0" target="_blank" style="display:inline-flex;align-items:center;gap:7px;background:transparent;color:var(--teal-light);border:1px solid rgba(61,154,139,.4);font-family:'DM Sans',sans-serif;font-size:12px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;text-decoration:none;padding:9px 18px;border-radius:3px;">
+            v2.0.0 Release Notes
+          </a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- PROJECT NAV FOOTER -->
+  <div class="project-nav-footer">
+    <a href="/recent-project.html" class="proj-nav-back">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="transform:rotate(180deg)"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+      Back to Projects
+    </a>
+    <a href="/contact.html" class="proj-nav-cta">
+      Get in touch
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+    </a>
+  </div>
+
+</div><!-- /case-study -->
+
+<footer>© 2026 oh golly britta &nbsp;·&nbsp; made with ♡, terracotta &amp; a healthy suspicion of default settings</footer>
+
+<script>
+(function() {
+  var btn  = document.querySelector('.nav-hamburger');
+  var menu = document.getElementById('nav-mobile-menu');
+  if (!btn || !menu) return;
+  btn.addEventListener('click', function() {
+    var open = btn.getAttribute('aria-expanded') === 'true';
+    btn.setAttribute('aria-expanded', String(!open));
+    btn.classList.toggle('is-open', !open);
+    menu.classList.toggle('is-open', !open);
+  });
+  menu.querySelectorAll('a').forEach(function(a) {
+    a.addEventListener('click', function() {
+      btn.setAttribute('aria-expanded', 'false');
+      btn.classList.remove('is-open');
+      menu.classList.remove('is-open');
+    });
+  });
+})();
+</script>
+</body>
+</html>
