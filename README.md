@@ -1,4 +1,4 @@
-# Sage v2.1.1 🌿
+# Sage v2.1.2 🌿
 ### A privacy-first voice assistant for your kitchen, built on a Raspberry Pi.
 
 Sage is an open-source voice assistant that does the everyday things a kitchen assistant should do — set timers, give weather reports, manage reminders, chat with Claude AI — without sending your voice to the cloud. The voice pipeline runs entirely on a Raspberry Pi.
@@ -46,6 +46,7 @@ A **USB conference speakerphone** like the **Jabra SPEAK 510** is optional but h
 - ⏱ **Preset food timers** — 23 built-in presets, say "pasta timer" and it auto-sets
 - ⏱ **Multiple simultaneous timers** — "What timers are running?"
 - 🔔 **Persistent alarms** — repeating chime until you say "stop"
+- 📲 **Timer push notifications** — push to your phone via [ntfy](https://ntfy.sh) when a timer goes off
 
 ### Reminders
 - 📋 **Voice reminders (relative)** — "Remind me to check the laundry in 20 minutes"
@@ -524,9 +525,10 @@ Wake word detection (MFCC model + Whisper verification)
               |              |                |
               └──── Piper TTS → Speaker ──────┘
                               |
-              Scheduled reminders ─┐
-              Calendar events ─────┤→ ntfy push → Phone
-              Security alerts ─────┘
+              Timer alerts ─────────┐
+              Scheduled reminders ──┤
+              Calendar events ──────┤→ ntfy push → Phone
+              Security alerts ──────┘
 ```
 
 All speech processing happens on-device. Outbound network traffic is limited to: Spotify streaming, ntfy push notifications, weather API (Open-Meteo), Google Calendar iCal fetches, and Claude API calls (only when you say "Hey Claude").
@@ -621,7 +623,7 @@ Soldering required to attach jumper wires to the LED ring pads (PWR, GND, DIN). 
 - Sage uses two-stage detection: MFCC model triggers, then Whisper verifies "sage" was spoken
 - The MFCC model requires sufficient audio energy (`RMS_GATE * 2`) and buffer energy (`_buf_rms > 150`) to run inference
 - Lower `DAYTIME_RMS_GATE` in `sage.py` if Sage consistently misses you (default: 80)
-- Lower `WW_THRESHOLD` (default: 0.67) if the MFCC model isn't triggering — but too low causes false positives
+- Lower `WW_THRESHOLD` (default: 0.90) if the MFCC model isn't triggering — but too low causes false positives
 - Move the mic away from the Pi's fan if possible (USB extension cable helps)
 
 **Whisper recognition is poor**

@@ -312,6 +312,22 @@ def _ensure_spotify_device():
 # Load cached device on startup
 _load_cached_device()
 
+# Pre-warm: light discovery only (no raspotify restart on startup).
+# If the device is visible to the Web API, populate the cache so the first
+# play command hits the fast path. If not, the existing fallback in
+# _ensure_spotify_device handles recovery on first use.
+if sp:
+    try:
+        _prewarm = _get_spotify_device(retries=3)
+        if _prewarm:
+            print(f"Spotify device pre-warmed: {_prewarm[:12]}...", flush=True)
+        else:
+            print("Spotify device pre-warm: device not visible to Web API "
+                  "(likely needs a one-time Connect transfer from another "
+                  "Spotify client to register).", flush=True)
+    except Exception as e:
+        print(f"Spotify pre-warm error: {e}", flush=True)
+
 # ── Text-to-speech ───────────────────────────────────────────────────────────
 PIPER_DIR = "/home/sage/piper"
 VOICE_MODEL        = "/home/sage/piper-voices/en_GB-northern_english_male-medium.onnx"  # Sage — Northern British male
@@ -544,7 +560,7 @@ def play_thinking_chime():
     _play_raw(s)
 
 # ── Whisper command listener ─────────────────────────────────────────────────
-def whisper_listen(max_seconds=6.5, spoken_prompt=None, silent=False, sensitivity=1.5, skip_threshold=False):
+def whisper_listen(max_seconds=6.5, spoken_prompt=None, silent=False, sensitivity=1.5, skip_threshold=False, bail_silence_seconds=None):
     """Play chime, record with silence detection, then transcribe with Faster Whisper."""
     import wave
     wav_path = "/tmp/sage_cmd.wav"
@@ -609,6 +625,8 @@ def whisper_listen(max_seconds=6.5, spoken_prompt=None, silent=False, sensitivit
         baseline = 500
     threshold = baseline * sensitivity  # adjustable speech detection sensitivity
 
+    bail_chunks = (int(bail_silence_seconds * sample_rate / chunk_size)
+                   if bail_silence_seconds else None)
     for _ in range(max_chunks - chunk_count):
         data = rec_proc.stdout.read(chunk_size * 2)
         if not data:
@@ -624,6 +642,9 @@ def whisper_listen(max_seconds=6.5, spoken_prompt=None, silent=False, sensitivit
             silence_count += 1
             if chunk_count >= min_recording and silence_count >= silence_cutoff:
                 break
+        # Early bail: if no speech detected within bail_silence_seconds, stop.
+        if bail_chunks and not speech_started and chunk_count >= bail_chunks:
+            break
 
     rec_proc.terminate()
     rec_proc.wait()
@@ -733,10 +754,11 @@ def whisper_check_stop():
     return any(w in text for w in dismiss_words)
 
 def play_alarm_loop(stop_event):
-    """Play alarm chimes, pausing periodically to listen for dismissal via Whisper."""
+    """Play alarm chimes continuously, pausing briefly to listen for dismissal."""
     try:
+        cycle = 0
         while stop_event.is_set():
-            # Play chime for a few cycles (~6 seconds worth)
+            # Play chime for a few cycles
             ap = subprocess.Popen(
                 ["aplay", "-r", "22050", "-f", "S16_LE", "-c", "1", "-D", SPEAKER_DEVICE],
                 stdin=subprocess.PIPE, stderr=subprocess.DEVNULL
@@ -752,21 +774,20 @@ def play_alarm_loop(stop_event):
                 print(f"Alarm pipe error: {e}", flush=True)
             if not stop_event.is_set():
                 break
-            # Request mic from main loop
-            mic_released.clear()
-            mic_release.set()
-            mic_released.wait(timeout=3)
-            if not stop_event.is_set():
+            cycle += 1
+            # Every 3rd cycle (~18s), do a quick Whisper listen for dismissal
+            if cycle % 3 == 0:
+                mic_released.clear()
+                mic_release.set()
+                mic_released.wait(timeout=3)
+                if not stop_event.is_set():
+                    mic_release.clear()
+                    break
+                if whisper_check_stop():
+                    stop_event.clear()
+                    mic_release.clear()
+                    break
                 mic_release.clear()
-                break
-            # Listen for dismissal word — brief cue so user knows window is open
-            speak("Say stop to silence.")
-            if whisper_check_stop():
-                stop_event.clear()
-                mic_release.clear()
-                break
-            # Give mic back to main loop and repeat
-            mic_release.clear()
     finally:
         alarm_playing.clear()
         mic_release.clear()
@@ -791,6 +812,7 @@ def run_timer(timer):
     alarm_playing.set()  # Block main loop BEFORE speaking
     print(f"ALARM: {timer['label']} is done!")
     sys.stdout.flush()
+    send_notification(f"Your {timer['label']} {'is' if 'timer' in timer['label'] else 'are'} done!", title="Timer Done")
     # Speak the announcement once, then chime with Whisper-based dismiss
     if "timer" in timer["label"]:
         speak(f"Your {timer['label']} is done!")
@@ -1347,6 +1369,7 @@ def handle_command(text):
                   "yeah", "yep", "yes", "done", "shut", "quiet", "top", "stuff", "stock", "hop"]
     if any(w in text for w in stop_words):
         if dismiss_alarms():
+            speak("Timer stopped.")
             play_confirm_chime()  # descending chime = dismissed
             lights.set_state("idle")
             return
@@ -2193,7 +2216,7 @@ def _ww_extract_features(samples_int16, sr=16000, num_mfcc=13, num_filters=26, f
 # Load MFCC wake word model
 _ww_session = None
 _ww_input_name = None
-WW_THRESHOLD = 0.67
+WW_THRESHOLD = 0.90
 WW_COOLDOWN = 5  # seconds between triggers
 try:
     _ww_session = _ww_ort.InferenceSession("/home/sage/hey_sage_mfcc_v6.onnx")
@@ -2271,9 +2294,15 @@ def enter_claude_mode():
         "This is Claude, I'm listening.",
         "Claude here, what's on your mind?",
     ]))
+    # Known Whisper hallucinations to treat as silence (don't reset idle timer)
+    _claude_hallucinations = {"you", "uh", "mm", "hmm",
+                              "thank you for watching", ".", "..."}
     while in_conversation:
-        command = whisper_listen(max_seconds=10, skip_threshold=True)
-        if not command or command.strip() == "" or "[blank" in command.lower():
+        command = whisper_listen(max_seconds=15, skip_threshold=False,
+                                 bail_silence_seconds=3)
+        _stripped = (command or "").strip().strip(".").strip().lower()
+        if (not command or _stripped == "" or "[blank" in command.lower()
+                or _stripped in _claude_hallucinations):
             if time.time() - last_activity > CLAUDE_IDLE_TIMEOUT:
                 speak_claude("Alright, I'll let you go.")
                 in_conversation = False
@@ -2448,13 +2477,18 @@ while True:
                 _vwf.setframerate(16000)
                 _vwf.writeframes(_ww_audio_buffer.tobytes())
             try:
+                # vad_filter=True: silent/noise buffers return empty instead of
+                # hallucinating "thanks"/"you"/etc. that leak through verify.
                 _segs, _ = whisper_model.transcribe(_verify_path, language="en",
-                    beam_size=1, best_of=1, vad_filter=False)
+                    beam_size=1, best_of=1, vad_filter=True)
                 _ww_text = " ".join(s.text for s in _segs).strip().lower()
-                # Check for "sage" or common Whisper mishearings of it
-                _sage_variants = ["sage", "say", "saige", "saje", "sag", "safe",
-                                  "stage", "page", "saved", "hey sage"]
-                _ww_verified = any(v in _ww_text for v in _sage_variants)
+                # Whole-word match for "sage" + a couple of true Whisper
+                # mishearings. Substring match (e.g. "say" in "saying") was
+                # confirming hallucinations like "i'm not saying" — fixed.
+                import re as _ww_re
+                _sage_pattern = _ww_re.compile(
+                    r"\b(sage|saige|saje|hey sage)\b")
+                _ww_verified = bool(_sage_pattern.search(_ww_text))
                 print(f"Wake verify: '{_ww_text}' -> {'CONFIRMED' if _ww_verified else 'REJECTED'}", flush=True)
                 if not _ww_verified:
                     print(f"MFCC false positive rejected (heard: '{_ww_text}')", flush=True)
